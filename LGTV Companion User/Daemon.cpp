@@ -41,6 +41,7 @@
 #include <ctime>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include "user_idle_mode.h"
+#include "display_guard.h"
 #include "resource.h"
 
 #pragma comment(lib, "urlmon.lib")
@@ -66,6 +67,7 @@
 #define         TIMER_TOPOLOGY_COLLECTION_DELAY			3000
 #define         TIMER_DISPLAYS_OFF						24
 #define         TIMER_DISPLAYS_OFF_DELAY				2000
+#define         TIMER_DISPLAY_GUARD						25
 #define			COPYDATA_MUTEX_WAIT						10
 #define         APP_DISPLAYCHANGE						WM_USER+10
 #define         APP_SET_MESSAGEFILTER					WM_USER+11
@@ -170,6 +172,7 @@ std::shared_ptr<IpcClient2>		p_pipe_client;
 Preferences						Prefs(CONFIG_FILE);
 std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
+DisplayGuard					display_guard([](const std::wstring& message) { communicateWithService(L"display_guard " + message, false); });
 
 static bool RawInput_ValveVendorReportIsActivity(ControllerInfo& cache, const RAWHID& hid);
 
@@ -272,6 +275,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance,
 		SetTimer(h_main_wnd, TIMER_VERSIONCHECK, TIMER_VERSIONCHECK_DELAY, (TIMERPROC)NULL);
 	if (Prefs.topology_support_)
 		SetTimer(h_main_wnd, TIMER_TOPOLOGY, TIMER_TOPOLOGY_DELAY, (TIMERPROC)NULL);
+	SetTimer(h_main_wnd, TIMER_DISPLAY_GUARD, display_guard.checkInterval(), (TIMERPROC)NULL);
 	if (Prefs.remote_streaming_host_support_)
 		SetTimer(h_main_wnd, TIMER_CHECK_PROCESSES, TIMER_CHECK_PROCESSES_DELAY, (TIMERPROC)NULL);
 	if (Prefs.user_idle_mode_)
@@ -752,6 +756,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			log(L"Turning off windows displays (sync with remote streaming end mode).");
 			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 		}break;
+		case TIMER_DISPLAY_GUARD:
+		{
+			display_guard.check();
+			SetTimer(hWnd, TIMER_DISPLAY_GUARD, display_guard.checkInterval(), (TIMERPROC)NULL);
+		}break;
 		case TIMER_TOPOLOGY_COLLECTION:
 		{
 			KillTimer(hWnd, (UINT_PTR)TIMER_TOPOLOGY_COLLECTION);
@@ -878,6 +887,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						}
 						RawInput_ClearCache();
 						log(L"System requests displays ON.");
+						display_guard.rearm();
 					}
 					return true;
 				}
@@ -894,6 +904,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	}break;
 	case WM_DISPLAYCHANGE:
 	{
+		display_guard.rearm();
+		display_guard.check();
 		if (Prefs.topology_support_)
 		{
 			time_t now = time(0);

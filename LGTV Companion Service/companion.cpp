@@ -951,6 +951,18 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 					continue;
 				}
 			}
+			else if (daemon_command == "display_guard")
+			{
+				std::string trace;
+				for (size_t i = 3; i < nWords; i++)
+				{
+					if (i > 3)
+						trace += " ";
+					trace += words[i];
+				}
+				INFO_("Display", "%1% [remote stream: %2%, windows displays: %3%]", trace, remote_client_connected_ ? "connected" : "not connected", windows_power_status_on_ ? "on" : "off");
+				continue;
+			}
 			else if (daemon_command == "gfe")
 			{
 				INFO_(daemon_number, "NVIDIA GFE overlay fullscreen compatibility set");

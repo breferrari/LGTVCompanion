@@ -278,6 +278,7 @@
     <ClInclude Include="..\Common\preferences.h" />
     <ClInclude Include="..\Common\tools.h" />
     <ClInclude Include="user_idle_mode.h" />
+    <ClInclude Include="display_guard.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="daemon.h" />
   </ItemGroup>
@@ -287,6 +288,7 @@
     <ClCompile Include="..\Common\tools.cpp" />
     <ClCompile Include="daemon.cpp" />
     <ClCompile Include="user_idle_mode.cpp" />
+    <ClCompile Include="display_guard.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="LGTV Companion User.rc" />
