@@ -56,7 +56,8 @@ private:
 	std::vector <std::shared_ptr<SessionWrapper>>		sessions_;								
 	bool												windows_power_status_on_ = false;		
 	bool												remote_client_connected_ = false;
-	bool												remote_stream_powered_off_ = false;		// whether any device was actually powered off when the current remote stream started
+	bool												remote_stream_darkened_ = false;		// whether the current remote stream powered off or blanked any device
+	bool												stream_end_dark_pending_ = false;		// a stream ended with the devices kept dark. Windows displays are about to be turned off
 	bool												screensaver_active_ = false;
 	time_t												time_last_resume_or_boot_time = 0;
 	time_t												time_last_power_on = 0;
@@ -352,9 +353,12 @@ void Companion::Impl::dispatchEvent(Event& event) {
 		DEBUG("I/O Context purged and stopped!");
 	}
 */
-	// a new remote stream starts with no device known to have been powered off by it
+	// a new remote stream starts with no device known to have been darkened by it
 	if (event.getType() == EVENT_SYSTEM_REMOTE_CONNECT && !remote_client_connected_)
-		remote_stream_powered_off_ = false;
+	{
+		remote_stream_darkened_ = false;
+		stream_end_dark_pending_ = false;
+	}
 	// process event for ALL devices
 	if (event.getDevices().size() == 0)
 		for (auto& session : sessions_)
@@ -373,14 +377,14 @@ void Companion::Impl::dispatchEvent(Event& event) {
 		remote_client_connected_ = true;
 		break;
 	case EVENT_SYSTEM_REMOTE_DISCONNECT:
-		// When the end-of-stream mode leaves all managed displays powered off, request the
-		// desktop daemon to also turn off the windows displays, so that the power state of
-		// the devices remains in sync with the windows power state (and the displays can
-		// subsequently be woken by user input as usual). Only when the stream actually
-		// powered off a device at connect - otherwise there is nothing to keep in sync with.
+		// When the end-of-stream mode leaves all managed displays dark, request the desktop
+		// daemon to also turn off the windows displays once the display configuration has
+		// settled (the streaming host restores resolution/HDR first), so that the power state
+		// of the devices remains in sync with the windows power state. Turning the windows
+		// displays off powers off blanked devices too. Only when the stream actually darkened
+		// a device - otherwise there is nothing to keep in sync with.
 		if (remote_client_connected_ && windows_power_status_on_
-			&& remote_stream_powered_off_
-			&& prefs_.remote_streaming_host_prefer_power_off_
+			&& remote_stream_darkened_
 			&& prefs_.remote_streaming_host_end_mode_ != PREFS_REMOTE_END_POWER_ON)
 		{
 			bool any_display_restored = false;
@@ -392,6 +396,7 @@ void Companion::Impl::dispatchEvent(Event& event) {
 			{
 				DEBUG("Requesting the daemon to turn off windows displays (sync with remote streaming end mode)");
 				ipc_server_->send(L"DAEMON_DISPLAYS_OFF");
+				stream_end_dark_pending_ = true;
 			}
 		}
 		remote_client_connected_ = false;
@@ -427,6 +432,11 @@ void Companion::Impl::dispatchEvent(Event& event) {
 		break;
 	case EVENT_SYSTEM_DISPLAYOFF:
 		windows_power_status_on_ = false;
+		stream_end_dark_pending_ = false;
+		break;
+	case EVENT_SYSTEM_DISPLAY_LOST:
+		if (remote_client_connected_)
+			remote_stream_darkened_ = true;	// woken with the screen off
 		break;
 	case EVENT_SYSTEM_RESUME:
 		remote_client_connected_ = false;
@@ -437,6 +447,8 @@ void Companion::Impl::dispatchEvent(Event& event) {
 	case EVENT_SYSTEM_DISPLAYON:
 		windows_power_status_on_ = true;
 		time_last_power_on = pp_entry;
+		if (!remote_client_connected_)
+			stream_end_dark_pending_ = false;	// the user is back
 		break;
 	case EVENT_SYSTEM_RESUMEAUTO:
 		remote_client_connected_ = false;
@@ -478,14 +490,10 @@ bool Companion::Impl::isScreensaverActive(void)
 std::string Companion::Impl::remoteEndActionDescription(void)
 {
 	// Human-readable description of what happens to managed displays when a remote stream ends.
-	// The end-of-stream mode only applies in power-off mode; blank mode always restores.
-	if (prefs_.remote_streaming_host_prefer_power_off_)
-	{
-		if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_KEEP_OFF)
-			return "remain powered off";
-		if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_RESTORE)
-			return "be restored to their pre-streaming power state";
-	}
+	if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_KEEP_OFF)
+		return prefs_.remote_streaming_host_prefer_power_off_ ? "remain powered off" : "remain blanked, and power off when the display configuration has settled";
+	if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_RESTORE)
+		return "be restored to their pre-streaming power state";
 	return "power ON";
 }
 bool Companion::Impl::setHdmiInput(Event& event, SessionWrapper& session)
@@ -550,18 +558,15 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 			case EVENT_SYSTEM_REMOTE_CONNECT:
 				if (remote_client_connected_)
 					break;
-				if (prefs_.remote_streaming_host_prefer_power_off_)
-					session.client_.beginStreamStartCapture();	// (re-)arm and reset the capture, so a stale state from an earlier session cannot leak into the "Restore display" end mode
+				session.client_.beginStreamStartCapture();	// (re-)arm and reset the capture, so a stale state from an earlier session cannot leak into the "Restore display" end mode
 				if (windows_power_status_on_ == true)
 				{
 					if (prefs_.remote_streaming_host_prefer_power_off_)
-					{
 						work_was_enqueued = session.client_.powerOff();
-						if (work_was_enqueued)
-							remote_stream_powered_off_ = true;
-					}
 					else
 						work_was_enqueued = session.client_.blankScreen();
+					if (work_was_enqueued)
+						remote_stream_darkened_ = true;
 				}
 				break;
 			case EVENT_SYSTEM_REMOTE_DISCONNECT:
@@ -569,18 +574,16 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 					break;
 				if (windows_power_status_on_ == true)
 				{
-					// The end-of-stream option only governs the power-off mode. In blank mode the
-					// display is always restored (un-blanked), as before.
+					// The end-of-stream mode applies to both the power-off and the blank mode. A display
+					// kept blanked is powered off when the windows displays are turned off, once the
+					// streaming host has restored the display configuration.
 					bool restore_display = true;
-					if (prefs_.remote_streaming_host_prefer_power_off_)
+					if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_KEEP_OFF)
+						restore_display = false;
+					else if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_RESTORE)
 					{
-						if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_KEEP_OFF)
-							restore_display = false;
-						else if (prefs_.remote_streaming_host_end_mode_ == PREFS_REMOTE_END_RESTORE)
-						{
-							restore_display = (session.client_.streamStartPower() == STREAM_START_ON);	// only if the TV was on before streaming
-							DEBUG_(session.device_.name, "Pre-stream power state was %1%. The display will %2%", session.client_.streamStartPower() == STREAM_START_ON ? "ON" : "OFF or unknown", restore_display ? "power on" : "remain off");
-						}
+						restore_display = (session.client_.streamStartPower() == STREAM_START_ON);	// only if the TV was on before streaming
+						DEBUG_(session.device_.name, "Pre-stream power state was %1%. The display will %2%", session.client_.streamStartPower() == STREAM_START_ON ? "ON" : "OFF or unknown", restore_display ? "power on" : "remain off");
 					}
 					if (restore_display)
 					{
@@ -589,6 +592,8 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 							work_was_enqueued = setHdmiInput(event, session);
 					}
 				}
+				else if (remote_stream_darkened_ && !prefs_.remote_streaming_host_prefer_power_off_)
+					work_was_enqueued = session.client_.powerOff();	// the windows displays went off during the stream. A device kept blanked follows them now
 				break;
 			case EVENT_SYSTEM_REBOOT:
 			case EVENT_SYSTEM_RESUME:
@@ -630,7 +635,7 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 				break;
 
 			case EVENT_SYSTEM_DISPLAYOFF:
-				if (remote_client_connected_ && prefs_.remote_streaming_host_prefer_power_off_)
+				if (remote_client_connected_) // keep the streaming state (a blanked device must stay awake)
 					break;
 				if (windows_power_status_on_ == true)
 					work_was_enqueued = session.client_.powerOff();
@@ -638,6 +643,28 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 
 			case EVENT_SYSTEM_BLANKSCREEN:
 				work_was_enqueued = session.client_.blankScreen();
+				break;
+
+			case EVENT_SYSTEM_DISPLAY_LOST:
+				// Windows failed to enable the display (a mode set into a device in standby). It
+				// recovers when the device wakes. While streaming, or until the windows displays are
+				// turned off after a stream, wake it with the screen off. Otherwise the regular
+				// display power on handling wakes the device.
+				if (remote_client_connected_ || stream_end_dark_pending_)
+				{
+					INFO_(session.device_.name, "Waking the device with the screen off, so that Windows can enable the display");
+					work_was_enqueued = session.client_.powerOnDark();
+				}
+				break;
+
+			case EVENT_SYSTEM_DISPLAY_SETTLED:
+				// In power-off mode the device returns to standby once the display has been enabled
+				// and the configuration has settled.
+				if (remote_client_connected_ && prefs_.remote_streaming_host_prefer_power_off_)
+				{
+					INFO_(session.device_.name, "Display configuration settled. Returning the device to standby (remote streaming power off mode)");
+					work_was_enqueued = session.client_.powerOff();
+				}
 				break;
 
 			case EVENT_SYSTEM_USERIDLE:
@@ -950,6 +977,18 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 					ERR_(daemon_number, "Topology command is invalid");
 					continue;
 				}
+			}
+			else if (daemon_command == "display_lost")
+			{
+				if (!remote_client_connected_ && !stream_end_dark_pending_)
+					INFO_("Display", "Not streaming. Leaving the device to the regular display power handling");
+				event(EVENT_SYSTEM_DISPLAY_LOST);
+				continue;
+			}
+			else if (daemon_command == "display_settled")
+			{
+				event(EVENT_SYSTEM_DISPLAY_SETTLED);
+				continue;
 			}
 			else if (daemon_command == "display_guard")
 			{

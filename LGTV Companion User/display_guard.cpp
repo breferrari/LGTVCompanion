@@ -2,7 +2,7 @@
 #include <cfgmgr32.h>
 #include <initguid.h>
 #include <ntddvdeo.h>
-#include <iterator>
+#include <algorithm>
 #include <vector>
 
 #pragma comment(lib, "cfgmgr32.lib")
@@ -11,48 +11,24 @@
 
 namespace
 {
-	// Seconds to wait before each recovery attempt. The first entry is a grace period which lets a mode set
-	// already in flight (a resolution change, a monitor waking up) complete on its own.
-	constexpr UINT			kAttemptDelays[] = { 2, 3, 5, 10, 15, 30, 60, 60, 120, 120 };
-	constexpr int			kMaxAttempts = (int)std::size(kAttemptDelays);
-	// How long the last attempt gets to take effect before recovery is paused.
+	// No active path for this long before the display counts as lost. Lets a mode set already in flight (a
+	// resolution change, a monitor waking up) complete on its own.
+	constexpr ULONGLONG		kGraceMs = 1000;
+	// Repeat the wake request while the display stays lost, up to a limit.
+	constexpr ULONGLONG		kWakeRepeatMs = 20000;
+	constexpr int			kMaxWakeRequests = 3;
+	// The monitor vanishes briefly while the device wakes and re-enumerates. Only this long counts as unplugged.
+	constexpr ULONGLONG		kMonitorGoneMs = 60000;
+	// A recovered configuration counts as settled after this long without display changes.
 	constexpr ULONGLONG		kSettleMs = 10000;
-	// A restore seen this soon after a successful SetDisplayConfig call is credited to that attempt.
-	constexpr ULONGLONG		kAttributionWindowMs = 5000;
-	constexpr UINT			kIntervalWhileRecovering = 1000;
+	constexpr UINT			kIntervalBusy = 1000;
 	constexpr UINT			kIntervalNormal = 3000;
-
-	struct Method
-	{
-		UINT32			flags;
-		const wchar_t*	description;
-	};
-	// Alternate between re-applying the configuration Windows has saved for the connected monitors, and asking
-	// for the extended topology, which makes Windows build and commit a fresh set of paths.
-	constexpr Method		kMethods[] = {
-		{ SDC_APPLY | SDC_USE_DATABASE_CURRENT,	L"re-apply the saved display configuration" },
-		{ SDC_APPLY | SDC_TOPOLOGY_EXTEND,		L"apply the extended topology" },
-	};
 
 	std::wstring seconds(ULONGLONG ms)
 	{
 		wchar_t buffer[32];
 		swprintf_s(buffer, L"%.1f s", ms / 1000.0);
 		return buffer;
-	}
-
-	std::wstring resultText(LONG result)
-	{
-		switch (result)
-		{
-		case ERROR_SUCCESS:				return L"ERROR_SUCCESS";
-		case ERROR_INVALID_PARAMETER:	return L"ERROR_INVALID_PARAMETER";
-		case ERROR_GEN_FAILURE:			return L"ERROR_GEN_FAILURE";
-		case ERROR_NOT_SUPPORTED:		return L"ERROR_NOT_SUPPORTED";
-		case ERROR_ACCESS_DENIED:		return L"ERROR_ACCESS_DENIED";
-		case ERROR_BAD_CONFIGURATION:	return L"ERROR_BAD_CONFIGURATION";
-		default:						return L"error " + std::to_wstring(result);
-		}
 	}
 
 	// "\\?\DISPLAY#GSM82CD#5&3a415d7b&1&UID4352#{...}" -> "GSM82CD"
@@ -73,7 +49,7 @@ namespace
 	}
 }
 
-DisplayGuard::DisplayGuard(Trace trace) : trace_(std::move(trace))
+DisplayGuard::DisplayGuard(Hooks hooks) : hooks_(std::move(hooks))
 {
 }
 
@@ -85,92 +61,130 @@ void DisplayGuard::check(void)
 	if (!snapshot.valid)
 		return;	// transient (e.g. mid mode set or secure desktop). Try again on the next check
 	const ULONGLONG now = GetTickCount64();
+	switch (phase_)
+	{
+	case Phase::Healthy:	checkHealthy(snapshot, now);	break;
+	case Phase::Lost:		checkLost(snapshot, now);		break;
+	case Phase::Settling:	checkSettling(snapshot, now);	break;
+	}
+}
 
+void DisplayGuard::checkHealthy(const Snapshot& snapshot, ULONGLONG now)
+{
+	if (snapshot.active_paths > 0 || snapshot.connected_monitors == 0)	// fine, or headless
+	{
+		suspect_since_ = 0;
+		return;
+	}
+	if (suspect_since_ == 0)
+		suspect_since_ = now;
+	if (now - suspect_since_ < kGraceMs)
+		return;
+
+	phase_ = Phase::Lost;
+	lost_since_ = suspect_since_;
+	suspect_since_ = 0;
+	hooks_.trace(L"No active display path while " + std::to_wstring(snapshot.connected_monitors) + L" monitor(s) connected ("
+		+ snapshot.monitor_description + L"). Windows failed to enable the display");
+	requestWake(now);
+}
+
+void DisplayGuard::checkLost(const Snapshot& snapshot, ULONGLONG now)
+{
 	if (snapshot.active_paths > 0)
 	{
-		if (lost_)
-		{
-			std::wstring how;
-			if (last_attempt_ != 0 && last_attempt_result_ == ERROR_SUCCESS && now - last_attempt_ <= kAttributionWindowMs)
-				how = L"by recovery attempt " + std::to_wstring(attempts_);
-			else if (attempts_ > 0)
-				how = L"without help from the " + std::to_wstring(attempts_) + L" recovery attempt(s)";
-			else
-				how = L"on its own, before any recovery attempt";
-			trace_(L"Display path restored after " + seconds(now - lost_since_) + L" " + how + L". Active: " + snapshot.active_description);
-			reset();
-		}
+		std::wstring how = wake_requests_ > 0
+			? seconds(now - last_wake_request_) + L" after wake request " + std::to_wstring(wake_requests_)
+			: L"on its own";
+		hooks_.trace(L"Display path restored after " + seconds(now - lost_since_) + L", " + how + L". Active: " + snapshot.active_description);
+		phase_ = Phase::Settling;
+		restored_at_ = now;
+		monitor_missing_since_ = 0;
 		return;
 	}
 
 	if (snapshot.connected_monitors == 0)
 	{
-		if (lost_)
+		if (monitor_missing_since_ == 0)
 		{
-			trace_(L"Monitor disconnected while the display path was lost, after " + seconds(now - lost_since_) + L". Recovery stopped");
+			monitor_missing_since_ = now;
+			hooks_.trace(L"Monitor vanished from Windows after " + seconds(now - lost_since_) + L". Expected while the device wakes and reconnects");
+		}
+		else if (now - monitor_missing_since_ >= kMonitorGoneMs)
+		{
+			hooks_.trace(L"Monitor gone for " + seconds(now - monitor_missing_since_) + L". Treating it as unplugged. Recovery stopped");
 			reset();
 		}
 		return;
 	}
+	monitor_missing_since_ = 0;
 
-	if (!lost_)
-	{
-		lost_ = true;
-		lost_since_ = now;
-		next_attempt_ = now + kAttemptDelays[0] * 1000ULL;
-		trace_(L"No active display path while " + std::to_wstring(snapshot.connected_monitors) + L" monitor(s) connected (" + snapshot.monitor_description
-			+ L"). Windows failed to enable the display. Recovery starts in " + std::to_wstring(kAttemptDelays[0]) + L" s");
+	if (waiting_for_event_ || now - last_wake_request_ < kWakeRepeatMs)
 		return;
-	}
-
-	if (paused_ || now < next_attempt_)
-		return;
-	if (attempts_ < kMaxAttempts)
-		attemptRecovery(snapshot);
+	if (wake_requests_ < kMaxWakeRequests)
+		requestWake(now);
 	else
 	{
-		paused_ = true;
-		trace_(L"Recovery paused after " + std::to_wstring(attempts_) + L" attempts over " + seconds(now - lost_since_)
-			+ L". The display path is still lost. Recovery resumes on the next display change or display power on event");
+		waiting_for_event_ = true;
+		hooks_.trace(L"Display path still lost after " + seconds(now - lost_since_) + L" and " + std::to_wstring(wake_requests_)
+			+ L" wake requests. Requesting again on the next display change or display power on event");
 	}
 }
 
-void DisplayGuard::rearm(void)
+void DisplayGuard::checkSettling(const Snapshot& snapshot, ULONGLONG now)
 {
-	if (!lost_ || !paused_)
+	if (snapshot.active_paths == 0)	// lost again: start over, with the grace period
+	{
+		reset();
+		checkHealthy(snapshot, now);
 		return;
-	paused_ = false;
-	attempts_ = 0;
-	last_attempt_ = 0;
-	next_attempt_ = GetTickCount64() + kAttemptDelays[0] * 1000ULL;
-	trace_(L"Display event received while the display path is lost. Recovery resumes");
+	}
+	if (now - (std::max)(restored_at_, last_display_event_) < kSettleMs)
+		return;
+	hooks_.trace(L"Display configuration settled " + seconds(now - restored_at_) + L" after the restore. Active: " + snapshot.active_description);
+	reset();
+	hooks_.display_settled();
+}
+
+void DisplayGuard::requestWake(ULONGLONG now)
+{
+	wake_requests_++;
+	last_wake_request_ = now;
+	hooks_.trace(L"Wake request " + std::to_wstring(wake_requests_) + L"/" + std::to_wstring(kMaxWakeRequests) + L" sent to the service");
+	hooks_.display_lost();
+}
+
+void DisplayGuard::onDisplayEvent(void)
+{
+	last_display_event_ = GetTickCount64();
+	if (phase_ == Phase::Lost && waiting_for_event_)
+	{
+		waiting_for_event_ = false;
+		wake_requests_ = 0;
+		last_wake_request_ = 0;	// request again on the next check
+	}
+}
+
+bool DisplayGuard::busy(void) const
+{
+	return phase_ != Phase::Healthy || suspect_since_ != 0;
 }
 
 UINT DisplayGuard::checkInterval(void) const
 {
-	return lost_ && !paused_ ? kIntervalWhileRecovering : kIntervalNormal;
-}
-
-void DisplayGuard::attemptRecovery(const Snapshot& snapshot)
-{
-	const Method& method = kMethods[attempts_ % std::size(kMethods)];
-	attempts_++;
-	last_attempt_ = GetTickCount64();
-	last_attempt_result_ = SetDisplayConfig(0, NULL, 0, NULL, method.flags);
-	next_attempt_ = last_attempt_ + (attempts_ < kMaxAttempts ? kAttemptDelays[attempts_] * 1000ULL : kSettleMs);
-	trace_(L"Recovery attempt " + std::to_wstring(attempts_) + L"/" + std::to_wstring(kMaxAttempts) + L" after " + seconds(last_attempt_ - lost_since_)
-		+ L": " + method.description + L" (" + snapshot.monitor_description + L"). SetDisplayConfig returned " + resultText(last_attempt_result_));
+	return busy() ? kIntervalBusy : kIntervalNormal;
 }
 
 void DisplayGuard::reset(void)
 {
-	lost_ = false;
-	paused_ = false;
-	attempts_ = 0;
+	phase_ = Phase::Healthy;
+	suspect_since_ = 0;
 	lost_since_ = 0;
-	next_attempt_ = 0;
-	last_attempt_ = 0;
-	last_attempt_result_ = ERROR_SUCCESS;
+	last_wake_request_ = 0;
+	wake_requests_ = 0;
+	waiting_for_event_ = false;
+	monitor_missing_since_ = 0;
+	restored_at_ = 0;
 }
 
 DisplayGuard::Snapshot DisplayGuard::takeSnapshot(void)

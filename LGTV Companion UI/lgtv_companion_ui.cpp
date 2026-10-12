@@ -1872,8 +1872,8 @@ LRESULT CALLBACK WndOptionsProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		SendMessage(GetDlgItem(hWnd, IDC_COMBO_REMOTE_END), (UINT)CB_SETCURSEL, (WPARAM)Prefs.remote_streaming_host_end_mode_, (LPARAM)0);
 
 		EnableWindow(GetDlgItem(hWnd, IDC_COMBO_MODE), Prefs.remote_streaming_host_support_ ? true :  false);
-		// "Remote streaming end mode" only applies in power-off mode (index 0)
-		EnableWindow(GetDlgItem(hWnd, IDC_COMBO_REMOTE_END), (Prefs.remote_streaming_host_support_ && Prefs.remote_streaming_host_prefer_power_off_) ? true : false);
+		// "Remote streaming end mode" applies to both the power off and the blank mode
+		EnableWindow(GetDlgItem(hWnd, IDC_COMBO_REMOTE_END), Prefs.remote_streaming_host_support_ ? true : false);
 		EnableWindow(GetDlgItem(hWnd, IDC_CHECK_TOPOLOGY_LOGON), Prefs.topology_support_ ? true : false);
 		EnableWindow(GetDlgItem(hWnd, IDOK), false);
 	}break;
@@ -1962,9 +1962,8 @@ LRESULT CALLBACK WndOptionsProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
 			{
 				BOOL remoteOn = IsDlgButtonChecked(hWnd, IDC_CHECK_REMOTE);
-				BOOL powerOffMode = (SendMessage(GetDlgItem(hWnd, IDC_COMBO_MODE), CB_GETCURSEL, 0, 0) == 0);
 				EnableWindow(GetDlgItem(hWnd, IDC_COMBO_MODE), remoteOn);
-				EnableWindow(GetDlgItem(hWnd, IDC_COMBO_REMOTE_END), remoteOn && powerOffMode);
+				EnableWindow(GetDlgItem(hWnd, IDC_COMBO_REMOTE_END), remoteOn);
 				EnableWindow(GetDlgItem(hWnd, IDOK), true);
 			}break;
 
@@ -2059,12 +2058,6 @@ LRESULT CALLBACK WndOptionsProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 		}break;
 		case CBN_SELCHANGE:
 		{
-			if (LOWORD(wParam) == IDC_COMBO_MODE)
-			{
-				// "Remote streaming end mode" only applies in power-off mode (index 0)
-				BOOL powerOffMode = (SendMessage(GetDlgItem(hWnd, IDC_COMBO_MODE), CB_GETCURSEL, 0, 0) == 0);
-				EnableWindow(GetDlgItem(hWnd, IDC_COMBO_REMOTE_END), IsDlgButtonChecked(hWnd, IDC_CHECK_REMOTE) && powerOffMode);
-			}
 			EnableWindow(GetDlgItem(hWnd, IDOK), true);
 		}break;
 		default:break;

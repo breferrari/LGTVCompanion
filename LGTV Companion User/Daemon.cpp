@@ -66,7 +66,8 @@
 #define         TIMER_CHECK_PROCESSES_DELAY				5000
 #define         TIMER_TOPOLOGY_COLLECTION_DELAY			3000
 #define         TIMER_DISPLAYS_OFF						24
-#define         TIMER_DISPLAYS_OFF_DELAY				2000
+#define         TIMER_DISPLAYS_OFF_SETTLE				5000	// turn the displays off after this long without display changes...
+#define         TIMER_DISPLAYS_OFF_MAX_WAIT				30000	// ...but no later than this after the request
 #define         TIMER_DISPLAY_GUARD						25
 #define			COPYDATA_MUTEX_WAIT						10
 #define         APP_DISPLAYCHANGE						WM_USER+10
@@ -172,7 +173,11 @@ std::shared_ptr<IpcClient2>		p_pipe_client;
 Preferences						Prefs(CONFIG_FILE);
 std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
-DisplayGuard					display_guard([](const std::wstring& message) { communicateWithService(L"display_guard " + message, false); });
+ULONGLONG						displays_off_requested_at = 0;	// pending request to turn off the windows displays (0 = none)
+DisplayGuard					display_guard({
+	[](const std::wstring& message) { communicateWithService(L"display_guard " + message, false); },
+	[]() { communicateWithService(L"display_lost", false); },
+	[]() { communicateWithService(L"display_settled", false); } });
 
 static bool RawInput_ValveVendorReportIsActivity(ControllerInfo& cache, const RAWHID& hid);
 
@@ -424,7 +429,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		if (ProcessIdToSessionId(GetCurrentProcessId(), &session_id) && session_id == WTSGetActiveConsoleSessionId())
 		{
 			log(L"Service requests windows displays OFF (remote streaming end mode).");
-			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_DELAY, (TIMERPROC)NULL);
+			displays_off_requested_at = GetTickCount64();
+			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
 		}
 	}break;
 
@@ -751,8 +757,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		}break;
 		case TIMER_DISPLAYS_OFF:
 		{
-			// short delay has passed to let the streaming host restore resolution/HDR etc
+			// the streaming host has restored resolution/HDR etc and the display configuration has settled
 			KillTimer(hWnd, (UINT_PTR)TIMER_DISPLAYS_OFF);
+			if (display_guard.busy() && GetTickCount64() - displays_off_requested_at < TIMER_DISPLAYS_OFF_MAX_WAIT)
+			{
+				SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);	// a lost display is being recovered
+				break;
+			}
+			displays_off_requested_at = 0;
 			log(L"Turning off windows displays (sync with remote streaming end mode).");
 			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 		}break;
@@ -887,7 +899,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						}
 						RawInput_ClearCache();
 						log(L"System requests displays ON.");
-						display_guard.rearm();
+						display_guard.onDisplayEvent();
 					}
 					return true;
 				}
@@ -904,8 +916,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	}break;
 	case WM_DISPLAYCHANGE:
 	{
-		display_guard.rearm();
+		display_guard.onDisplayEvent();
 		display_guard.check();
+		// postpone turning off the windows displays until the display configuration has settled
+		if (displays_off_requested_at != 0 && GetTickCount64() - displays_off_requested_at < TIMER_DISPLAYS_OFF_MAX_WAIT)
+			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
 		if (Prefs.topology_support_)
 		{
 			time_t now = time(0);

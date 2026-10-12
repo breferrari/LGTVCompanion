@@ -20,6 +20,8 @@
 #define EVENT_SYSTEM_BLANKSCREEN						14	
 #define EVENT_SYSTEM_REMOTE_CONNECT						15
 #define EVENT_SYSTEM_REMOTE_DISCONNECT					16
+#define EVENT_SYSTEM_DISPLAY_LOST						17	// windows failed to enable a connected display (see display_guard)
+#define EVENT_SYSTEM_DISPLAY_SETTLED					18	// a lost display was enabled again and the configuration has settled
 
 // user (forced) events 
 #define EVENT_FORCE_DISPLAYON							30	

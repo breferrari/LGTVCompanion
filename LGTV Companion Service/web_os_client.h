@@ -24,7 +24,8 @@ public:
 	bool powerOn(void);
 	bool powerOff(bool = false);
 	bool blankScreen(bool = false);
-	void beginStreamStartCapture(void);	// arm one-shot capture of the TV power state at the next power-off query
+	bool powerOnDark(void);				// power on (WOL if needed) and blank the screen as soon as the device is on
+	void beginStreamStartCapture(void);	// arm one-shot capture of the TV power state at the next power-off or blank query
 	int streamStartPower(void);			// -1 unknown, 0 was off, 1 was on (see STREAM_START_* above)
 	bool sendRequest(std::string data, std::string log_message, int delay = 0);
 	bool sendButton(std::string button);

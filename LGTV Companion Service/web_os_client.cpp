@@ -75,6 +75,7 @@ public:
 	int									retry_count_ = 0;
 	std::string							status_arp_override_for_wol_;
 	bool								forced_ = false;
+	bool								dark_ = false;			// WORK_POWER_ON: blank the screen as soon as the device is on
 	std::string							log_message = "";
 	int									delay_ = 0;
 	void clear(void)
@@ -87,6 +88,7 @@ public:
 		retry_count_ = 0;
 		status_arp_override_for_wol_ = "";
 		forced_ = false;
+		dark_ = false;
 		log_message = "";
 		delay_ = 0;
 	}
@@ -330,7 +332,7 @@ void WebOsClient::Impl::startNextWork(void)
 			break;
 
 		case WORK_POWER_ON:
-			DEBUG("---  Starting work: POWER ON  -----------------");
+			DEBUG(work_.dark_ ? "---  Starting work: POWER ON (SCREEN OFF)  -----------------" : "---  Starting work: POWER ON  -----------------");
 			if (socket_status_ == SOCKET_CONNECTED)
 				send(JSON_GETPOWERSTATE);
 			else
@@ -666,7 +668,15 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 		{
 			if (response_id == "getPowerState" && !payload["state"].empty() && payload["state"].is_string()) // query power state
 			{
-				if (payload["state"] == "Active" && payload["processing"].empty()) // Device is ON
+				if (payload["state"] == "Active" && payload["processing"].empty() && work_.dark_) // Device is ON, blank it right away
+					send(JSON_BLANK);
+				else if (payload["state"] == "Screen Off" && work_.dark_) // Device is ON and already blanked
+				{
+					INFO("Power state is ON (screen is blanked)");
+					isPoweredOn_ = true;
+					workIsFinished();
+				}
+				else if (payload["state"] == "Active" && payload["processing"].empty()) // Device is ON
 				{
 					if (device_settings_.extra.user_idle_mode_mute_speakers)
 						send(JSON_GETAUDIOSTATUS);
@@ -683,6 +693,21 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 					send(JSON_POWERTOGGLE);
 				else
 				{
+					async_timer_.expires_after(boost::asio::chrono::milliseconds(TIMER_POWER_POLL_WAIT));
+					async_timer_.async_wait(beast::bind_front_handler(&Impl::onWait, shared_from_this()));
+				}
+			}
+			else if (response_id == "blankScreen") // powered on with the screen off (dark_)
+			{
+				if (!payload["returnValue"].empty() && payload["returnValue"].is_boolean() && payload["returnValue"].get<bool>())
+				{
+					INFO("Power state is ON (screen is blanked)");
+					isPoweredOn_ = true;
+					workIsFinished();
+				}
+				else // not accepted yet, e.g. while the device is still starting. Poll and try again
+				{
+					WARNING("The device did not accept blanking the screen. Retrying");
 					async_timer_.expires_after(boost::asio::chrono::milliseconds(TIMER_POWER_POLL_WAIT));
 					async_timer_.async_wait(beast::bind_front_handler(&Impl::onWait, shared_from_this()));
 				}
@@ -789,6 +814,10 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 		{
 			if (response_id == "getPowerState" && !payload["state"].empty() && payload["state"].is_string()) // query power state
 			{
+				// one-shot capture of the TV power state at remote-stream start (for "restore previous state")
+				if (capture_stream_start_.exchange(false))
+					stream_start_power_ = (payload["state"] == "Active" || payload["state"] == "Screen Off") ? STREAM_START_ON : STREAM_START_OFF;
+
 				if (payload["state"] == "Active") // Device is ON and not blanked
 				{
 					if (device_settings_.check_hdmi_input_when_power_off && !work_.forced_)
@@ -952,6 +981,14 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 	}
 	else if (response_type == "error")
 	{
+		if (work_.type_ == WORK_POWER_ON && response_id == "blankScreen") // not accepted yet, e.g. while the device is still starting
+		{
+			WARNING("The device rejected blanking the screen: %1%. Retrying", error_msg);
+			async_timer_.expires_after(boost::asio::chrono::milliseconds(TIMER_POWER_POLL_WAIT));
+			async_timer_.async_wait(beast::bind_front_handler(&Impl::onWait, shared_from_this()));
+			read();
+			return;
+		}
 		if (work_.type_ == WORK_POWER_ON)
 		{
 			if(response_id == "unblankScreen")
@@ -1325,6 +1362,13 @@ bool WebOsClient::blankScreen(bool forced) {
 	Work work;
 	work.type_ = WORK_BLANK_SCREEN;
 	work.forced_ = forced;
+	pimpl->enqueueWork(work);
+	return true;
+}
+bool WebOsClient::powerOnDark(void) {
+	Work work;
+	work.type_ = WORK_POWER_ON;
+	work.dark_ = true;
 	pimpl->enqueueWork(work);
 	return true;
 }
