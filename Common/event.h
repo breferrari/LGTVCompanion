@@ -22,6 +22,7 @@
 #define EVENT_SYSTEM_REMOTE_DISCONNECT					16
 #define EVENT_SYSTEM_DISPLAY_LOST						17	// windows failed to enable a connected display (see display_guard)
 #define EVENT_SYSTEM_DISPLAY_SETTLED					18	// a lost display was enabled again and the configuration has settled
+#define EVENT_SYSTEM_REMOTE_PREPARE						19	// the streaming host is about to configure the display for a stream (CLI -streaming_prepare)
 
 // user (forced) events 
 #define EVENT_FORCE_DISPLAYON							30	

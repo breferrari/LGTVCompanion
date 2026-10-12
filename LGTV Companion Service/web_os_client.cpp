@@ -76,6 +76,8 @@ public:
 	std::string							status_arp_override_for_wol_;
 	bool								forced_ = false;
 	bool								dark_ = false;			// WORK_POWER_ON: blank the screen as soon as the device is on
+	bool								ready_ = false;			// WORK_POWER_ON: the device was confirmed on
+	std::vector<std::function<void(bool)>>	on_done_;		// notified once when the work ends or is dropped, with ready_
 	std::string							log_message = "";
 	int									delay_ = 0;
 	void clear(void)
@@ -89,6 +91,8 @@ public:
 		status_arp_override_for_wol_ = "";
 		forced_ = false;
 		dark_ = false;
+		ready_ = false;
+		on_done_.clear();
 		log_message = "";
 		delay_ = 0;
 	}
@@ -124,6 +128,7 @@ private:
 	bool makeMagicPacket(std::string, BYTE*, unsigned char*);
 	void startNextWork(void);
 	void workIsFinished(void);
+	void notifyDone(Work&);
 	void doClose(void);
 	void doDelayedClose(void);
 	void run(void);
@@ -194,23 +199,34 @@ void WebOsClient::Impl::enqueueWork(Work& work)
 	net::dispatch(resolver_.get_executor(), [unit = work, self = shared_from_this()]() mutable
 		{
 			//optimisations
+			// dequeue all currently queued WORK_POWER_ON/OFF, reporting them as not done
+			auto dequeue_power_work = [&self]() {
+				for (auto it = self->workQueue_.begin(); it != self->workQueue_.end();)
+					if (it->type_ == WORK_POWER_OFF || it->type_ == WORK_POWER_ON)
+					{
+						self->notifyDone(*it);
+						it = self->workQueue_.erase(it);
+					}
+					else
+						++it;
+				};
 			if (unit.type_ == WORK_POWER_ON ) //&& !unit.forced_)
 			{
-				// dequeue all currently queued WORK_POWER_ON/OFF
-				self->workQueue_.remove_if([](const Work& a) {
-					return (a.type_ == WORK_POWER_OFF || a.type_ == WORK_POWER_ON); // && !a.forced_;
-					});
+				dequeue_power_work();
 
-				// Discard if already trying to power on
+				// Discard if already trying to power on. The ongoing power on takes over a request to keep the screen off, and reports to its requester
 				if (self->work_.type_ == WORK_POWER_ON)
+				{
+					if (unit.dark_)
+						self->work_.dark_ = true;
+					for (auto& on_done : unit.on_done_)
+						self->work_.on_done_.push_back(std::move(on_done));
 					return;
+				}
 			}
 			else if (unit.type_ == WORK_POWER_OFF) //&& !unit.forced_)
 			{
-				// dequeue all currently queued WORK_POWER_ON/OFF
-				self->workQueue_.remove_if([](const Work& a) {
-					return (a.type_ == WORK_POWER_OFF || a.type_ == WORK_POWER_ON); // && !a.forced_;
-					});
+				dequeue_power_work();
 
 				// Discard if already trying to power off
 				if (self->work_.type_ == WORK_POWER_OFF)
@@ -271,6 +287,7 @@ void WebOsClient::Impl::startNextWork(void)
 			|| (work_.type_ != WORK_POWER_ON && time_diff > 10 + work_.delay_))
 		{
 			ERR("Lingering work of type %1% detected. Aborting lingering work!", std::to_string(work_.type_));
+			notifyDone(work_);
 			work_.clear();
 		}
 		else
@@ -393,14 +410,24 @@ void WebOsClient::Impl::startNextWork(void)
 }
 void WebOsClient::Impl::workIsFinished(void)
 {
+	notifyDone(work_);
 	work_.clear();
 	if(!workQueue_.empty())
 		Sleep(20); // potentially webOS does not like requests to be sent too quickly
 	timestamp_last_work_performed_ = time(0);
 	startNextWork();
 }
+void WebOsClient::Impl::notifyDone(Work& work)
+{
+	for (auto& on_done : work.on_done_)
+		on_done(work.ready_);
+	work.on_done_.clear();
+}
 void WebOsClient::Impl::doClose(void) {
+	for (auto& work : workQueue_)
+		notifyDone(work);
 	workQueue_ = {}; //clear work queue
+	notifyDone(work_);
 	work_.clear();
 	switch (socket_status_)
 	{
@@ -668,12 +695,17 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 		{
 			if (response_id == "getPowerState" && !payload["state"].empty() && payload["state"].is_string()) // query power state
 			{
+				// one-shot capture of the TV power state at remote-stream start, when the stream starts by waking the device.
+				// A device that could only be reached after retrying was asleep
+				if (work_.dark_ && capture_stream_start_.exchange(false))
+					stream_start_power_ = (payload["state"] == "Active" || payload["state"] == "Screen Off") && work_.retry_count_ == 0 ? STREAM_START_ON : STREAM_START_OFF;
+
 				if (payload["state"] == "Active" && payload["processing"].empty() && work_.dark_) // Device is ON, blank it right away
 					send(JSON_BLANK);
 				else if (payload["state"] == "Screen Off" && work_.dark_) // Device is ON and already blanked
 				{
 					INFO("Power state is ON (screen is blanked)");
-					isPoweredOn_ = true;
+					isPoweredOn_ = work_.ready_ = true;
 					workIsFinished();
 				}
 				else if (payload["state"] == "Active" && payload["processing"].empty()) // Device is ON
@@ -683,7 +715,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 					else
 					{
 						INFO("Power state is ON");
-						isPoweredOn_ = true;
+						isPoweredOn_ = work_.ready_ = true;
 						workIsFinished();
 					}
 				}
@@ -702,7 +734,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 				if (!payload["returnValue"].empty() && payload["returnValue"].is_boolean() && payload["returnValue"].get<bool>())
 				{
 					INFO("Power state is ON (screen is blanked)");
-					isPoweredOn_ = true;
+					isPoweredOn_ = work_.ready_ = true;
 					workIsFinished();
 				}
 				else // not accepted yet, e.g. while the device is still starting. Poll and try again
@@ -719,7 +751,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 				else
 				{
 					INFO("Power state is ON");
-					isPoweredOn_ = true;
+					isPoweredOn_ = work_.ready_ = true;
 					workIsFinished();
 				}
 			}
@@ -731,7 +763,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 			else if (response_id == "unmute")
 			{
 				INFO("Power state is ON");
-				isPoweredOn_ = true;
+				isPoweredOn_ = work_.ready_ = true;
 				workIsFinished();
 			}
 			else if (response_id == "getAudioStatus")
@@ -741,7 +773,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 				else
 				{
 					INFO("Power state is ON");
-					isPoweredOn_ = true;
+					isPoweredOn_ = work_.ready_ = true;
 					workIsFinished();
 				}
 			}
@@ -993,7 +1025,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 		{
 			if(response_id == "unblankScreen")
 			{
-				isPoweredOn_ = true;
+				isPoweredOn_ = work_.ready_ = true;
 				INFO("Power state is ON");
 			}
 			else
@@ -1365,10 +1397,12 @@ bool WebOsClient::blankScreen(bool forced) {
 	pimpl->enqueueWork(work);
 	return true;
 }
-bool WebOsClient::powerOnDark(void) {
+bool WebOsClient::powerOnDark(std::function<void(bool)> on_done) {
 	Work work;
 	work.type_ = WORK_POWER_ON;
 	work.dark_ = true;
+	if (on_done)
+		work.on_done_.push_back(std::move(on_done));
 	pimpl->enqueueWork(work);
 	return true;
 }

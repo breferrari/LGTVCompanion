@@ -10,8 +10,9 @@ Versions are the upstream version the fork is based on, plus a fork build number
 
 When the GPU has to switch on a TV that has been in standby for a while, for example because Windows wakes the displays or the streaming host changes the resolution or HDR, the mode set can fail. Windows then keeps the monitor connected but enables no display at all, and never retries. Windows records this as a `VIDEO_DXGKRNL_BLACK_SCREEN_LIVEDUMP (0x1A8)` live dump, argument `0xA`, in `C:\Windows\LiveKernelReports\WATCHDOG`. The streaming host finds nothing to capture: the stream goes black, or the host fails to start with "Unable to find display or encoder", and only restarting it helps. Retrying the mode set does not help while the TV sleeps. Windows enables the display as soon as the TV wakes.
 
-The fork handles this in three places:
+The fork handles this in four places:
 
+- **Wake before the display is configured** (`-streaming_prepare`). The streaming host runs `LGTV Companion.exe -streaming_prepare` right before it changes the display for a stream. The service wakes every managed device with the screen off, whether Windows has its displays on or off, and the command returns once each device is confirmed awake (at most 50 seconds). The mode set then reaches a device that can accept it. Regular prep commands run too late for this: Sunshine configures the display first, and fails the launch when that leaves no display. Upstream Sunshine has no hook that runs early enough, so this needs the fork of Sunshine described in [Sunshine](#sunshine).
 - **Display path guard** (daemon). Detects a connected monitor with no active display path, and asks the service to wake the device. It checks every second for 15 seconds after a display change or display power on event, and while recovering, and every 10 seconds otherwise.
 - **Wake with the screen off** (service). While streaming, or until the Windows displays are turned off after a stream, the device is powered on and its screen blanked as soon as it is on, so the panel stays dark. Outside of streaming the regular display power handling applies.
 - **"Display blanked" remote streaming mode with an end mode.** The "Remote streaming end mode" option also applies to the blank mode. With "Display blanked" and "Display off" the TV stays awake with the screen off for the whole stream, so no mode set ever targets a sleeping TV, and goes to standby once the stream has ended and the display configuration has settled.
@@ -39,15 +40,20 @@ For a PC that streams with Sunshine or Apollo and uses an LG OLED as its display
 | LGTV Companion | Remote streaming end mode | Display off |
 | LGTV Companion | Updates | Off, or notify (checks this fork) |
 | Sunshine / Apollo | `global_prep_cmd` | Run `"C:\Program Files\LGTV Companion\LGTV Companion.exe" -streaming_connect` on start and `-streaming_disconnect` on undo |
+| Sunshine (fork) | `dd_prepare_cmd` | `"C:\Program Files\LGTV Companion\LGTV Companion.exe" -streaming_prepare` |
 | LG TV | Quick Start+ | On |
 | LG TV | TV On With Mobile | On, so LGTV Companion can control the TV over the network |
+
+## Sunshine
+
+A display in standby can only be protected if it is woken before the streaming host changes the display mode. Sunshine applies the mode first and runs its prep commands after, so the fork [breferrari/Sunshine](https://github.com/breferrari/Sunshine) adds `dd_prepare_cmd`: a command that Sunshine runs, and waits for, before it configures the display for a launch or a resume. Set it to `-streaming_prepare` as in the recommended settings. It is on the branch `fork/prep-before-display`, on top of the upstream release it is based on, and its installer is built by the fork's "Fork Windows Build" workflow.
 
 ## Clean Windows install
 
 1. Download the latest `LGTV.Companion.Setup.v<version>.x64.msi` from the [releases page](https://github.com/breferrari/LGTVCompanion/releases) and install it.
 2. Open LGTV Companion, add the TV and pair it (accept the prompt on the TV).
 3. Apply the [recommended settings](#recommended-settings).
-4. Install Sunshine or Apollo and add the `global_prep_cmd` above.
+4. Install Sunshine from [the fork](#sunshine) and add the `global_prep_cmd` and `dd_prepare_cmd` above.
 
 Installing a fork release over an upstream install, or over another fork build, upgrades it in place and keeps the configuration.
 

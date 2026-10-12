@@ -260,6 +260,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance,
 		prepareForUninstall();
 		return false;
 	}
+	if (command_line.rfind(L"-streaming_prepare", 0) == 0)
+	{
+		prepareStreaming();
+		return false;
+	}
 	// if commandline directed towards daemon
 	if (messageDaemon(command_line))
 		return false;
@@ -3755,6 +3760,37 @@ bool messageDaemon(std::wstring cmdline)
 void ipcCallback(std::wstring message, LPVOID pt)
 {
 	return;
+}
+
+// -streaming_prepare is run by the streaming host before it configures the display for a stream (Sunshine:
+// dd_prepare_cmd). The service wakes the devices with the screen off, and this process returns once the
+// service reports back, so that the host only changes the display mode when the devices can accept it.
+#define			STREAMING_PREPARE_TIMEOUT			50000	// ms. Sunshine waits up to 60 s for the command
+static HANDLE		streaming_prepared_event = NULL;
+static std::wstring	streaming_prepared_reply;
+static void ipcCallbackStreamingPrepare(std::wstring message, LPVOID pt)
+{
+	if (message.find(streaming_prepared_reply) != std::wstring::npos)
+		SetEvent(streaming_prepared_event);
+}
+void prepareStreaming(void)
+{
+	std::wstring token = std::to_wstring(GetCurrentProcessId());
+	streaming_prepared_reply = L"STREAMING_PREPARED " + token + L" ";
+	streaming_prepared_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (!streaming_prepared_event)
+		return;
+	auto client = std::make_shared<IpcClient2>(PIPENAME, ipcCallbackStreamingPrepare, (LPVOID)NULL);
+	int max_wait = 1000;
+	while (!client->send(L"-streaming_prepare " + token) && max_wait > 0)
+	{
+		Sleep(25);
+		max_wait -= 25;
+	}
+	if (max_wait > 0)
+		WaitForSingleObject(streaming_prepared_event, STREAMING_PREPARE_TIMEOUT);
+	client->terminate();
+	CloseHandle(streaming_prepared_event);
 }
 
 void prepareForUninstall(void)

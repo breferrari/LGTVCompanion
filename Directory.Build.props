@@ -8,6 +8,6 @@
     upstream release, set the first three to the upstream version and start the fourth again at 1.
   -->
   <PropertyGroup>
-    <ForkVersion>5.7.0.1</ForkVersion>
+    <ForkVersion>5.7.0.2</ForkVersion>
   </PropertyGroup>
 </Project>

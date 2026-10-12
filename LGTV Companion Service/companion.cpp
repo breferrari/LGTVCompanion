@@ -13,7 +13,9 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <tlhelp32.h>
 
@@ -46,6 +48,15 @@ public:
 	};
 	~SessionWrapper() {};
 };
+// The streaming host is about to configure the display for a stream (CLI -streaming_prepare). The devices
+// are woken with the screen off first, and the requester is told once each one has reported back
+struct StreamPrepare {
+	std::string											token_;		// identifies the requester in the reply
+	int													pending_ = 0;
+	bool												all_ready_ = true;
+	std::mutex											mutex_;
+	std::chrono::steady_clock::time_point				start_ = std::chrono::steady_clock::now();
+};
 class Companion::Impl : public std::enable_shared_from_this<Companion::Impl> {
 private:
 	boost::asio::io_context								ioc_;
@@ -58,6 +69,7 @@ private:
 	bool												remote_client_connected_ = false;
 	bool												remote_stream_darkened_ = false;		// whether the current remote stream powered off or blanked any device
 	bool												stream_end_dark_pending_ = false;		// a stream ended with the devices kept dark. Windows displays are about to be turned off
+	std::shared_ptr<StreamPrepare>						stream_prepare_;						// the latest -streaming_prepare request
 	bool												screensaver_active_ = false;
 	time_t												time_last_resume_or_boot_time = 0;
 	time_t												time_last_power_on = 0;
@@ -73,6 +85,7 @@ private:
 	bool												isScreensaverActive(void);
 	bool												setHdmiInput(Event&, SessionWrapper&);
 	std::string											remoteEndActionDescription(void);
+	void												streamPrepared(std::shared_ptr<StreamPrepare>, std::string, bool);
 	void												enableSession(std::vector<std::string>);
 	void												disableSession(std::vector<std::string>);
 	std::string											setTopology(std::vector<std::string>);
@@ -355,7 +368,7 @@ void Companion::Impl::dispatchEvent(Event& event) {
 	}
 */
 	// a new remote stream starts with no device known to have been darkened by it
-	if (event.getType() == EVENT_SYSTEM_REMOTE_CONNECT && !remote_client_connected_)
+	if ((event.getType() == EVENT_SYSTEM_REMOTE_CONNECT || event.getType() == EVENT_SYSTEM_REMOTE_PREPARE) && !remote_client_connected_)
 	{
 		remote_stream_darkened_ = false;
 		stream_end_dark_pending_ = false;
@@ -375,6 +388,7 @@ void Companion::Impl::dispatchEvent(Event& event) {
 	switch (event.getType())
 	{
 	case EVENT_SYSTEM_REMOTE_CONNECT:
+	case EVENT_SYSTEM_REMOTE_PREPARE:
 		remote_client_connected_ = true;
 		break;
 	case EVENT_SYSTEM_REMOTE_DISCONNECT:
@@ -491,6 +505,23 @@ bool Companion::Impl::isScreensaverActive(void)
 	CloseHandle(snapshot);
 	return false;
 }
+void Companion::Impl::streamPrepared(std::shared_ptr<StreamPrepare> prepare, std::string device, bool ready)
+{
+	// called on the device's I/O strand when its wake work has ended
+	if (!prepare)
+		return;
+	std::lock_guard<std::mutex> lock(prepare->mutex_);
+	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - prepare->start_).count();
+	if (ready)
+		INFO_(device, "Awake with the screen off after %1% ms. The streaming host can configure the display", std::to_string(ms));
+	else
+	{
+		WARNING_(device, "Could not confirm that the device is awake after %1% ms. The streaming host configures the display anyway", std::to_string(ms));
+		prepare->all_ready_ = false;
+	}
+	if (--prepare->pending_ == 0)
+		ipc_server_->send(tools::widen("STREAMING_PREPARED " + prepare->token_ + (prepare->all_ready_ ? " ready" : " failed")));
+}
 std::string Companion::Impl::remoteEndActionDescription(void)
 {
 	// Human-readable description of what happens to managed displays when a remote stream ends.
@@ -596,9 +627,22 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 							work_was_enqueued = setHdmiInput(event, session);
 					}
 				}
-				else if (remote_stream_darkened_ && !prefs_.remote_streaming_host_prefer_power_off_)
-					work_was_enqueued = session.client_.powerOff();	// the windows displays went off during the stream. A device kept blanked follows them now
+				else if (remote_stream_darkened_)
+					work_was_enqueued = session.client_.powerOff();	// the windows displays went off during the stream. A device kept dark, blanked or woken with the screen off, follows them now
 				break;
+			case EVENT_SYSTEM_REMOTE_PREPARE:
+				// The streaming host changes resolution and HDR next, and a device in standby fails that mode set,
+				// leaving Windows without a display. Wake it with the screen off, whatever the power state of the
+				// windows displays, and report back when it is on
+				if (!remote_client_connected_)
+					session.client_.beginStreamStartCapture();
+				work_was_enqueued = session.client_.powerOnDark(
+					[self = shared_from_this(), prepare = stream_prepare_, device = session.device_.name](bool ready) {
+						self->streamPrepared(prepare, device, ready);
+					});
+				remote_stream_darkened_ = true;
+				break;
+
 			case EVENT_SYSTEM_REBOOT:
 			case EVENT_SYSTEM_RESUME:
 			case EVENT_SYSTEM_RESUMEAUTO:
@@ -1073,6 +1117,33 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 			else
 				INFO_("CLI", "Forced streaming client connect. Global power status is OFF.");
 			event(EVENT_SYSTEM_REMOTE_CONNECT);
+			continue;
+		}
+		else if (command == "streaming_prepare")
+		{
+			// sent by the streaming host before it configures the display for a stream, and waited for
+			std::string reply = "STREAMING_PREPARED ";
+			reply += nWords > 1 ? words[1] : "";
+			if (!prefs_.remote_streaming_host_support_)
+			{
+				INFO_("CLI", "The streaming host is about to configure the display. Support for remote streaming is disabled.");
+				ipc_server_->send(tools::widen(reply + " ready"));
+				continue;
+			}
+			auto prepare = std::make_shared<StreamPrepare>();
+			prepare->token_ = nWords > 1 ? words[1] : "";
+			for (auto& session : sessions_)
+				if (session->device_.enabled)
+					prepare->pending_++;
+			if (prepare->pending_ == 0)
+			{
+				INFO_("CLI", "The streaming host is about to configure the display. No device is managed automatically.");
+				ipc_server_->send(tools::widen(reply + " ready"));
+				continue;
+			}
+			INFO_("CLI", "The streaming host is about to configure the display for a stream. All managed devices will be woken with the screen off first");
+			stream_prepare_ = prepare;
+			event(EVENT_SYSTEM_REMOTE_PREPARE);
 			continue;
 		}
 		else if (command == "streaming_disconnect")
