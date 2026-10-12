@@ -10,6 +10,7 @@ namespace tools
 	std::string								tolower(std::string input);
 	std::wstring							tolower(std::wstring input);
 	std::vector<std::string>				stringsplit(std::string, std::string);
+	bool										isNewerVersion(const std::vector<std::string>& local, const std::vector<std::string>& remote);
 	std::wstring							getWndText(HWND);
 	void									replaceAllInPlace(std::string& str, const std::string& from, const std::string& to);
 	std::string								validateArgument(std::string argument, std::string validation_list);

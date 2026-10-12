@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    This repository is a fork of JPersson77/LGTVCompanion (see Docs/Fork.md).
+
+    ForkVersion is the upstream version the fork is based on, followed by the fork build number. It is the
+    only place to change the version: the applications (APP_VERSION, through Common/fork_define.h) and the
+    installer (Product.wxs) both read it. Bump the fourth number for every fork release. After merging an
+    upstream release, set the first three to the upstream version and start the fourth again at 1.
+  -->
+  <PropertyGroup>
+    <ForkVersion>5.7.0.1</ForkVersion>
+  </PropertyGroup>
+</Project>

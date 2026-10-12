@@ -1,0 +1,13 @@
+<Project>
+  <!-- Pass ForkVersion (Directory.Build.props) to the C++ projects and to the installer project. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>FORK_VERSION="$(ForkVersion)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);ForkVersion=$(ForkVersion)</DefineConstants>
+    <!-- ICE61 flags MajorUpgrade/@AllowSameVersionUpgrades, which fork builds of one upstream version need (Product.wxs) -->
+    <SuppressIces>$(SuppressIces);ICE61</SuppressIces>
+  </PropertyGroup>
+</Project>

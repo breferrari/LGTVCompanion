@@ -3627,16 +3627,7 @@ void threadVersionCheck(HWND hWnd)
 
 		if (local_ver.size() < 3 || remote_ver.size() < 3)
 			return;
-		int local_ver_major = atoi(local_ver[0].c_str());
-		int local_ver_minor = atoi(local_ver[1].c_str());
-		int local_ver_patch = atoi(local_ver[2].c_str());
-
-		int remote_ver_major = atoi(remote_ver[0].c_str());
-		int remote_ver_minor = atoi(remote_ver[1].c_str());
-		int remote_ver_patch = atoi(remote_ver[2].c_str());
-		if ((remote_ver_major > local_ver_major) ||
-			(remote_ver_major == local_ver_major) && (remote_ver_minor > local_ver_minor) ||
-			(remote_ver_major == local_ver_major) && (remote_ver_minor == local_ver_minor) && (remote_ver_patch > local_ver_patch))
+		if (tools::isNewerVersion(local_ver, remote_ver))
 		{
 			PostMessage(hWnd, APP_NEW_VERSION, 0, 0);
 		}

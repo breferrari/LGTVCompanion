@@ -25,3 +25,6 @@
 #define			CUSTOM_MESSAGE_UPD_REFRESH		L"LGTVC_CUSTOM_MESSAGE_UPD_REFRESH"
 #define			CUSTOM_MESSAGE_UPD_CLOSE		L"LGTVC_CUSTOM_MESSAGE_UPD_CLOSE"
 #define			CUSTOM_MESSAGE_LGTVC_CLOSE		L"LGTVC_CUSTOM_MESSAGE_LGTVC_CLOSE"
+
+// fork specific overrides (version, release links)
+#include "fork_define.h"

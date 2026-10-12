@@ -1,11 +1,11 @@
-﻿<!-- When publishing updated version, make sure to update "ProductCode" GUID and "Version" -->
+﻿<!-- The version comes from ForkVersion in Directory.Build.props. The ProductCode is generated for every build. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" >
   <Package Name="LGTV Companion" Language="1033" 
-           Version="5.7.0" Manufacturer="J Persson" UpgradeCode="0BA17E5B-11CE-491D-B1A1-05DD2D9F610A" InstallerVersion="500" 
-           ProductCode="{30E34C39-D56E-421E-A99E-F044E461AAE1}">
+           Version="$(var.ForkVersion)" Manufacturer="J Persson" UpgradeCode="0BA17E5B-11CE-491D-B1A1-05DD2D9F610A" InstallerVersion="500">
     <SummaryInformation Description="LGTV Companion installer" />
     <Media Id="1" Cabinet="LGTVapp.cab" EmbedCab="yes" />   
-    <MajorUpgrade DowngradeErrorMessage="A newer version of LGTV Companion is already installed." />
+    <!-- Windows Installer ignores the fourth version field, so fork builds of the same upstream version must replace each other -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of LGTV Companion is already installed." />
     <WixVariable Id="WixUIDialogBmp" Value="$(var.ProjectDir)installerbackground.bmp"/>
     <WixVariable Id="WixUIBannerBmp" Value="$(var.ProjectDir)installerbanner.bmp"/>
 

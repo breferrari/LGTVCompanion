@@ -615,16 +615,7 @@ void threadVersionCheck(HWND hWnd)
 			PostMessage(hWnd, APP_VERSION_CHECK_FAIL, NULL, NULL);
 			return;
 		}
-		int local_ver_major = atoi(local_ver[0].c_str());
-		int local_ver_minor = atoi(local_ver[1].c_str());
-		int local_ver_patch = atoi(local_ver[2].c_str());
-
-		int remote_ver_major = atoi(remote_ver[0].c_str());
-		int remote_ver_minor = atoi(remote_ver[1].c_str());
-		int remote_ver_patch = atoi(remote_ver[2].c_str());
-		if ((remote_ver_major > local_ver_major) ||
-			(remote_ver_major == local_ver_major) && (remote_ver_minor > local_ver_minor) ||
-			(remote_ver_major == local_ver_major) && (remote_ver_minor == local_ver_minor) && (remote_ver_patch > local_ver_patch))
+		if (tools::isNewerVersion(local_ver, remote_ver))
 		{
 			
 			for (const auto& asset : json_data["assets"])

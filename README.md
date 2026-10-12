@@ -1,3 +1,5 @@
+> **Fork of [JPersson77/LGTVCompanion](https://github.com/JPersson77/LGTVCompanion).** What it changes, recommended settings, and how it is released: [Docs/Fork.md](Docs/Fork.md).
+
 # LGTV Companion
 
 ## Download and install instructions

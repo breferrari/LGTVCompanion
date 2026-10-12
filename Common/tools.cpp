@@ -445,3 +445,16 @@ std::string	tools::getIPfromLUIDandEndpoint(uint64_t& value, std::string& destin
 	InetNtopA(AF_INET, &sourceAddress.Ipv4.sin_addr, ipBuffer, INET_ADDRSTRLEN);
 	return std::string(ipBuffer);
 }
+
+// Whether remote is a newer version than local. Compares as many numeric components as the longer version has
+// (missing ones count as 0), so that fork builds such as 5.7.0.1 and 5.7.0.2 compare as expected.
+bool tools::isNewerVersion(const std::vector<std::string>& local, const std::vector<std::string>& remote) {
+	for (size_t i = 0; i < (std::max)(local.size(), remote.size()); i++)
+	{
+		int l = i < local.size() ? atoi(local[i].c_str()) : 0;
+		int r = i < remote.size() ? atoi(remote[i].c_str()) : 0;
+		if (r != l)
+			return r > l;
+	}
+	return false;
+}

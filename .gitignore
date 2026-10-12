@@ -341,3 +341,5 @@ healthchecksdb
 
 # VCPKG
 /vcpkg_installed/
+# Fork: release output of Scripts/Build-Release.ps1
+/dist/
