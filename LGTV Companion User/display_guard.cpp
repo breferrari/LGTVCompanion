@@ -21,8 +21,11 @@ namespace
 	constexpr ULONGLONG		kMonitorGoneMs = 60000;
 	// A recovered configuration counts as settled after this long without display changes.
 	constexpr ULONGLONG		kSettleMs = 10000;
-	constexpr UINT			kIntervalBusy = 1000;
-	constexpr UINT			kIntervalNormal = 3000;
+	// Checks are cheap, but stay event driven: frequent right after a display event, when failures happen,
+	// and while recovering. Otherwise only an occasional check as a fallback.
+	constexpr UINT			kIntervalFast = 1000;
+	constexpr UINT			kIntervalIdle = 10000;
+	constexpr ULONGLONG		kFastAfterEventMs = 15000;
 
 	std::wstring seconds(ULONGLONG ms)
 	{
@@ -172,7 +175,8 @@ bool DisplayGuard::busy(void) const
 
 UINT DisplayGuard::checkInterval(void) const
 {
-	return busy() ? kIntervalBusy : kIntervalNormal;
+	const bool recent_event = last_display_event_ != 0 && GetTickCount64() - last_display_event_ < kFastAfterEventMs;
+	return busy() || recent_event ? kIntervalFast : kIntervalIdle;
 }
 
 void DisplayGuard::reset(void)

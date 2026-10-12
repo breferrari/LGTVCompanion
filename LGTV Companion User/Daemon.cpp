@@ -42,6 +42,7 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include "user_idle_mode.h"
 #include "display_guard.h"
+#include "stream_liveness.h"
 #include "resource.h"
 
 #pragma comment(lib, "urlmon.lib")
@@ -69,10 +70,14 @@
 #define         TIMER_DISPLAYS_OFF_SETTLE				5000	// turn the displays off after this long without display changes...
 #define         TIMER_DISPLAYS_OFF_MAX_WAIT				30000	// ...but no later than this after the request
 #define         TIMER_DISPLAY_GUARD						25
+#define         TIMER_STREAM_LIVENESS					26
+#define         TIMER_STREAM_LIVENESS_DELAY				15000	// sampled only while the service reports a remote stream
+#define         STREAM_STALE_AFTER						90000	// streaming host encoder idle this long: the stream has ended
 #define			COPYDATA_MUTEX_WAIT						10
 #define         APP_DISPLAYCHANGE						WM_USER+10
 #define         APP_SET_MESSAGEFILTER					WM_USER+11
 #define         APP_DISPLAYS_OFF_REQUEST				WM_USER+12
+#define         APP_STREAM_STATE						WM_USER+13
 #define         APP_USER_IDLE_ON						1
 #define         APP_USER_IDLE_OFF						2
 #define         TOPOLOGY_OK								1
@@ -174,6 +179,9 @@ Preferences						Prefs(CONFIG_FILE);
 std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
 ULONGLONG						displays_off_requested_at = 0;	// pending request to turn off the windows displays (0 = none)
+StreamLiveness					stream_liveness;
+ULONGLONG						stream_last_active = 0;			// last time the streaming host was seen encoding
+bool							stream_stale_reported = false;
 DisplayGuard					display_guard({
 	[](const std::wstring& message) { communicateWithService(L"display_guard " + message, false); },
 	[]() { communicateWithService(L"display_lost", false); },
@@ -431,6 +439,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			log(L"Service requests windows displays OFF (remote streaming end mode).");
 			displays_off_requested_at = GetTickCount64();
 			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
+		}
+	}break;
+
+	case APP_STREAM_STATE:
+	{
+		// The service reports whether it considers a remote stream to be running. While it does, verify that the
+		// streaming host actually streams, so that a session the host never closed cannot keep the devices dark.
+		if (wParam)
+		{
+			stream_last_active = GetTickCount64();
+			stream_stale_reported = false;
+			SetTimer(hWnd, TIMER_STREAM_LIVENESS, TIMER_STREAM_LIVENESS_DELAY, (TIMERPROC)NULL);
+			log(L"Remote stream reported by the service. Verifying streaming host activity.");
+		}
+		else
+		{
+			KillTimer(hWnd, TIMER_STREAM_LIVENESS);
+			stream_liveness.close();
 		}
 	}break;
 
@@ -768,6 +794,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			log(L"Turning off windows displays (sync with remote streaming end mode).");
 			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 		}break;
+		case TIMER_STREAM_LIVENESS:
+		{
+			const ULONGLONG now = GetTickCount64();
+			if (stream_liveness.sample() != StreamLiveness::State::Idle)	// streaming, or nothing to judge by
+				stream_last_active = now;
+			else if (!stream_stale_reported && now - stream_last_active >= STREAM_STALE_AFTER)
+			{
+				stream_stale_reported = true;
+				communicateWithService(L"remote_stale " + std::to_wstring((now - stream_last_active) / 1000), false);
+			}
+		}break;
 		case TIMER_DISPLAY_GUARD:
 		{
 			display_guard.check();
@@ -900,6 +937,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						RawInput_ClearCache();
 						log(L"System requests displays ON.");
 						display_guard.onDisplayEvent();
+						SetTimer(hWnd, TIMER_DISPLAY_GUARD, display_guard.checkInterval(), (TIMERPROC)NULL);
 					}
 					return true;
 				}
@@ -918,6 +956,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 		display_guard.onDisplayEvent();
 		display_guard.check();
+		SetTimer(hWnd, TIMER_DISPLAY_GUARD, display_guard.checkInterval(), (TIMERPROC)NULL);
 		// postpone turning off the windows displays until the display configuration has settled
 		if (displays_off_requested_at != 0 && GetTickCount64() - displays_off_requested_at < TIMER_DISPLAYS_OFF_MAX_WAIT)
 			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
@@ -1694,6 +1733,10 @@ void ipcCallback(std::wstring message, LPVOID pt)
 {
 	if (message.find(L"DAEMON_DISPLAYS_OFF") != std::wstring::npos)
 		PostMessage(h_main_wnd, APP_DISPLAYS_OFF_REQUEST, NULL, NULL);
+	else if (message.find(L"DAEMON_STREAM_STARTED") != std::wstring::npos)
+		PostMessage(h_main_wnd, APP_STREAM_STATE, 1, NULL);
+	else if (message.find(L"DAEMON_STREAM_ENDED") != std::wstring::npos)
+		PostMessage(h_main_wnd, APP_STREAM_STATE, 0, NULL);
 	return;
 }
 

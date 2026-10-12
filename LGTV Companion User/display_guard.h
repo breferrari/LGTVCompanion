@@ -26,7 +26,7 @@ public:
 
 	// Evaluate the display state now. Call from a timer and on display related events.
 	void		check(void);
-	// A display change or display power on event occurred.
+	// A display change or display power on event occurred. Reschedule the timer with checkInterval() after this.
 	void		onDisplayEvent(void);
 	// Whether a lost display is being recovered or has not settled yet.
 	bool		busy(void) const;

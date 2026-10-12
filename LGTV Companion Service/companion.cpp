@@ -327,6 +327,7 @@ std::string Companion::Impl::validateDevices(std::vector<std::string> devices){
 void Companion::Impl::dispatchEvent(Event& event) {
 	if (sessions_.size() == 0)
 		return;
+	const bool was_remote_client_connected = remote_client_connected_;
 	// fix for only receiving DIMMED event when screensaver is active
 	if (event.getType() == EVENT_SYSTEM_DISPLAYDIMMED)
 	{
@@ -461,6 +462,9 @@ void Companion::Impl::dispatchEvent(Event& event) {
 		break;
 	default:break;
 	}
+	// let the daemon verify that a reported remote stream is actually running
+	if (remote_client_connected_ != was_remote_client_connected)
+		ipc_server_->send(remote_client_connected_ ? L"DAEMON_STREAM_STARTED" : L"DAEMON_STREAM_ENDED");
 	return;
 }
 bool Companion::Impl::isScreensaverActive(void)
@@ -875,6 +879,19 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 			else if (daemon_command == "started")
 			{
 				DEBUG_(daemon_number, "Daemon started!");
+				if (remote_client_connected_)
+					ipc_server_->send(L"DAEMON_STREAM_STARTED");
+				continue;
+			}
+			else if (daemon_command == "remote_stale")
+			{
+				// the streaming host has not encoded any video for a while, although no disconnect was reported
+				if (remote_client_connected_)
+				{
+					INFO_(daemon_number, "The streaming host has not streamed any video for %1% s. The remote stream has ended without a disconnect. All managed devices will %2%",
+						nWords > 3 ? words[3] : "?", remoteEndActionDescription());
+					event(EVENT_SYSTEM_REMOTE_DISCONNECT);
+				}
 				continue;
 			}
 			else if (daemon_command == "remote_connect")
