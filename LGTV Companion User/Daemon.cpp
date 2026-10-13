@@ -77,6 +77,7 @@
 #define         APP_DISPLAYCHANGE						WM_USER+10
 #define         APP_SET_MESSAGEFILTER					WM_USER+11
 #define         APP_DISPLAYS_OFF_REQUEST				WM_USER+12
+#define         APP_MONITORS_OFF_REQUEST				WM_USER+14
 #define         APP_STREAM_STATE						WM_USER+13
 #define         APP_USER_IDLE_ON						1
 #define         APP_USER_IDLE_OFF						2
@@ -436,9 +437,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		DWORD session_id = 0;
 		if (ProcessIdToSessionId(GetCurrentProcessId(), &session_id) && session_id == WTSGetActiveConsoleSessionId())
 		{
+			// Off right away, so that the streaming host restoring resolution and HDR sends no picture to the devices.
+			// The service powers them off once the display configuration has settled.
 			log(L"Service requests windows displays OFF (remote streaming end mode).");
+			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 			displays_off_requested_at = GetTickCount64();
 			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
+		}
+	}break;
+
+	case APP_MONITORS_OFF_REQUEST:
+	{
+		// A remote stream is about to start and the devices are woken with the screen off. Without a picture to
+		// show, they stay dark while they start up.
+		DWORD session_id = 0;
+		if (ProcessIdToSessionId(GetCurrentProcessId(), &session_id) && session_id == WTSGetActiveConsoleSessionId())
+		{
+			log(L"Service requests windows displays OFF (remote stream starting).");
+			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 		}
 	}break;
 
@@ -791,8 +807,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				break;
 			}
 			displays_off_requested_at = 0;
-			log(L"Turning off windows displays (sync with remote streaming end mode).");
-			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
+			log(L"Display configuration settled after the remote stream.");
+			communicateWithService(L"stream_end_settled", false);
 		}break;
 		case TIMER_STREAM_LIVENESS:
 		{
@@ -1731,7 +1747,9 @@ std::string sunshine_GetConfVal(std::string buf, std::string conf_item)
 }
 void ipcCallback(std::wstring message, LPVOID pt)
 {
-	if (message.find(L"DAEMON_DISPLAYS_OFF") != std::wstring::npos)
+	if (message.find(L"DAEMON_MONITORS_OFF") != std::wstring::npos)
+		PostMessage(h_main_wnd, APP_MONITORS_OFF_REQUEST, NULL, NULL);
+	else if (message.find(L"DAEMON_DISPLAYS_OFF") != std::wstring::npos)
 		PostMessage(h_main_wnd, APP_DISPLAYS_OFF_REQUEST, NULL, NULL);
 	else if (message.find(L"DAEMON_STREAM_STARTED") != std::wstring::npos)
 		PostMessage(h_main_wnd, APP_STREAM_STATE, 1, NULL);
