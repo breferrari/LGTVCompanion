@@ -656,7 +656,18 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 
 			case EVENT_SYSTEM_DISPLAYON:
 				if (remote_client_connected_)
+				{
+					// The device may show the picture again when the signal returns, even after confirming that the
+					// screen was off. Keep a device the stream darkened dark: now, and once more when it has had time
+					// to react to the signal
+					if (remote_stream_darkened_ && windows_power_status_on_ == false)
+					{
+						INFO_(session.device_.name, "Windows displays turned on during the remote stream. Keeping the screen off");
+						work_was_enqueued = session.client_.blankScreen(true);
+						work_was_enqueued = session.client_.sendRequest(JSON_BLANK, "screen off (stream, after the signal returned)", 5);
+					}
 					break;
+				}
 				if (prefs_.topology_support_ && !session.topology_enabled_)
 					break;
 				work_was_enqueued = session.client_.powerOn();
