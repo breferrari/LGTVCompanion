@@ -46,7 +46,7 @@ For a PC that streams with Sunshine or Apollo and uses an LG OLED as its display
 
 ## Sunshine
 
-A display in standby can only be protected if it is woken before the streaming host changes the display mode. Sunshine applies the mode first and runs its prep commands after, so the fork [breferrari/Sunshine](https://github.com/breferrari/Sunshine) adds `dd_prepare_cmd`: a command that Sunshine runs, and waits for, before it configures the display for a launch or a resume. Set it to `-streaming_prepare` as in the recommended settings. It is on the branch `fork/prep-before-display`, on top of the upstream release it is based on, and its installer is built by the fork's "Fork Windows Build" workflow.
+A display in standby can only be protected if it is woken before the streaming host changes the display mode. Sunshine applies the mode first and runs its prep commands after, so the fork [breferrari/Sunshine](https://github.com/breferrari/Sunshine) adds `dd_prepare_cmd`: a command that Sunshine runs, and waits for, before it configures the display for a launch or a resume. Set it to `-streaming_prepare` as in the recommended settings. It is on the branch `fork/prep-before-display`, rebased onto upstream `master` to pick up upstream fixes as they land (`git fetch upstream; git rebase upstream/master`). Its installer is built by the fork's "Fork Windows Build" workflow, which runs on every push to the branch and can be started by hand.
 
 ## Clean Windows install
 
