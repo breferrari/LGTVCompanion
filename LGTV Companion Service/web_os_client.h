@@ -23,7 +23,7 @@ public:
 	explicit WebOsClient(boost::asio::io_context&, boost::asio::ssl::context&, Device&, Logging&) ;
 	~WebOsClient();
 	bool powerOn(void);
-	bool powerOff(bool = false);
+	bool powerOff(bool forced = false, bool persistent = false);	// persistent: keep retrying an unreachable device for the power on timeout
 	bool blankScreen(bool = false);
 	bool powerOnDark(std::function<void(bool)> on_done = {});	// power on (WOL if needed) and blank the screen as soon as the device is on. on_done(confirmed on) is called once when done
 	void beginStreamStartCapture(void);	// arm one-shot capture of the TV power state at the next power-off or blank query

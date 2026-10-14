@@ -77,6 +77,7 @@ public:
 	bool								forced_ = false;
 	bool								dark_ = false;			// WORK_POWER_ON: blank the screen as soon as the device is on
 	bool								ready_ = false;			// WORK_POWER_ON: the device was confirmed on
+	bool								persistent_ = false;	// WORK_POWER_OFF: keep retrying an unreachable device for the power on timeout
 	std::vector<std::function<void(bool)>>	on_done_;		// notified once when the work ends or is dropped, with ready_
 	std::string							log_message = "";
 	int									delay_ = 0;
@@ -92,6 +93,7 @@ public:
 		forced_ = false;
 		dark_ = false;
 		ready_ = false;
+		persistent_ = false;
 		on_done_.clear();
 		log_message = "";
 		delay_ = 0;
@@ -283,8 +285,9 @@ void WebOsClient::Impl::startNextWork(void)
 	if (work_.type_ != WORK_UNDEFINED) // work is already ongoing
 	{
 		time_t time_diff = time(0) - work_.timestamp_start_;
-		if (work_.type_ == WORK_POWER_ON && time_diff > (device_settings_.extra.timeout + 10)
-			|| (work_.type_ != WORK_POWER_ON && time_diff > 10 + work_.delay_))
+		bool long_work = work_.type_ == WORK_POWER_ON || work_.persistent_;
+		if (long_work && time_diff > (device_settings_.extra.timeout + 10)
+			|| (!long_work && time_diff > 10 + work_.delay_))
 		{
 			ERR("Lingering work of type %1% detected. Aborting lingering work!", std::to_string(work_.type_));
 			notifyDone(work_);
@@ -1120,7 +1123,24 @@ void WebOsClient::Impl::onError(beast::error_code& ec, std::string err) {
 	case WORK_BLANK_SCREEN:
 	case WORK_REQUEST:
 	case WORK_BUTTON:
-		if (socket_status_ == SOCKET_CONNECTED || socket_status_ == SOCKET_CONNECTING)
+		if (work_.persistent_ && (socket_status_ == SOCKET_CONNECTED || socket_status_ == SOCKET_CONNECTING))
+		{
+			// A device kept awake with the screen off for hours can stop answering on Wi-Fi for a while. Keep
+			// trying for the power on timeout, without waking it (it may already be in standby)
+			if (time(0) - work_.timestamp_start_ < device_settings_.extra.timeout)
+			{
+				DEBUG("The device did not respond. Retrying");
+				async_timer_.expires_after(boost::asio::chrono::milliseconds(TIMER_RETRY_WAIT));
+				async_timer_.async_wait(beast::bind_front_handler(&Impl::onRetryConnection, shared_from_this()));
+			}
+			else
+			{
+				WARNING("The device did not respond for %1% s. It could not be powered off and may remain on with the screen off", std::to_string(device_settings_.extra.timeout));
+				socket_status_ = SOCKET_DISCONNECTED;
+				workIsFinished();
+			}
+		}
+		else if (socket_status_ == SOCKET_CONNECTED || socket_status_ == SOCKET_CONNECTING)
 		{
 			if (work_.retry_count_ < 2) // tried to write on invalid /closed socket
 			{
@@ -1383,10 +1403,11 @@ bool WebOsClient::powerOn(void) {
 	pimpl->enqueueWork(work);
 	return true;
 }
-bool WebOsClient::powerOff(bool forced) {
+bool WebOsClient::powerOff(bool forced, bool persistent) {
 	Work work;
 	work.type_ = WORK_POWER_OFF;
 	work.forced_ = forced;
+	work.persistent_ = persistent;
 	pimpl->enqueueWork(work);
 	return true;
 }

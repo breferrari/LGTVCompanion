@@ -722,7 +722,7 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 				if (stream_end_dark_pending_)
 				{
 					INFO_(session.device_.name, "Display configuration settled after the remote stream. Powering off");
-					work_was_enqueued = session.client_.powerOff();
+					work_was_enqueued = session.client_.powerOff(false, true);	// it must not stay on with the screen off
 				}
 				break;
 
