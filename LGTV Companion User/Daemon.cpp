@@ -72,6 +72,8 @@
 #define         TIMER_DISPLAY_GUARD						25
 #define         TIMER_STREAM_LIVENESS					26
 #define         TIMER_STREAM_LIVENESS_DELAY				15000	// sampled only while the service reports a remote stream
+#define         TIMER_SUNSHINE_LOG						27
+#define         TIMER_SUNSHINE_LOG_DELAY				1000	// while streaming: notice a disconnect before the host reverts the display (3 s by default)
 #define         STREAM_STALE_AFTER						90000	// streaming host encoder idle this long: the stream has ended
 #define			COPYDATA_MUTEX_WAIT						10
 #define         APP_DISPLAYCHANGE						WM_USER+10
@@ -467,11 +469,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			stream_last_active = GetTickCount64();
 			stream_stale_reported = false;
 			SetTimer(hWnd, TIMER_STREAM_LIVENESS, TIMER_STREAM_LIVENESS_DELAY, (TIMERPROC)NULL);
+			if (Prefs.remote_streaming_host_support_)
+				SetTimer(hWnd, TIMER_SUNSHINE_LOG, TIMER_SUNSHINE_LOG_DELAY, (TIMERPROC)NULL);
 			log(L"Remote stream reported by the service. Verifying streaming host activity.");
 		}
 		else
 		{
 			KillTimer(hWnd, TIMER_STREAM_LIVENESS);
+			KillTimer(hWnd, TIMER_SUNSHINE_LOG);
 			stream_liveness.close();
 		}
 	}break;
@@ -784,6 +789,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		case TIMER_CHECK_PROCESSES:
 		{
 			DWORD dw = checkRemoteStreamingProcesses();
+			if (dw)
+				remoteStreamingEvent(dw);
+		}break;
+		case TIMER_SUNSHINE_LOG:
+		{
+			// A client that disconnects without quitting the app runs no undo command, but the host still reverts
+			// the display. Checking only the size of the log is cheap, and the log is read only when it has grown.
+			DWORD dw = checkSunshineLogs();
 			if (dw)
 				remoteStreamingEvent(dw);
 		}break;
@@ -1427,34 +1440,19 @@ DWORD checkRemoteStreamingProcesses(void)
 	// was sunshine service found currently running?
 	if (bSunshineSvcProcessFound)
 	{
-		int index = 0;
-//		std::vector<DWORD> val(Remote.Sunshine_Log_Files.size());
-		for(auto& logfile : Remote.Sunshine_Log_Files)
+		// Installs without the registry entry (the Sunshine MSI): find the install through the Sunshine service
+		if (Remote.Sunshine_Log_Files.size() > 0 && Remote.Sunshine_Log_Files[0] == "")
 		{
-			if (logfile != "")
+			std::string log_file = sunshine_GetLogFile(sunshine_GetInstallDir());
+			if (log_file != "")
 			{
-				std::filesystem::path p(logfile);
-				uintmax_t Size = std::filesystem::file_size(p);
-				if (Size != Remote.Sunshine_Log_Sizes[index])
-				{
-					if (index == 0) // SUNSHINE
-					{
-						Remote.Sunshine_Log_Sizes[index] = Size;
-						ReturnValue |= sunshine_CheckLog(logfile);
-					}
-					else if (index == 1) //APOLLO
-					{
-						DWORD val = sunshine_CheckLog(logfile);
-						if (val == REMOTE_SUNSHINE_CONNECTED)
-							ReturnValue |= REMOTE_APOLLO_CONNECTED;
-						else if (val == REMOTE_SUNSHINE_NOT_CONNECTED)
-							ReturnValue |= REMOTE_APOLLO_NOT_CONNECTED;
-					}
-				}
-
+				std::error_code ec;
+				Remote.Sunshine_Log_Files[0] = log_file;
+				Remote.Sunshine_Log_Sizes[0] = std::filesystem::file_size(log_file, ec);
+				log(L"Sunshine log found through the Sunshine service: " + tools::widen(log_file));
 			}
-			index++;
 		}
+		ReturnValue |= checkSunshineLogs();
 	}
 	else
 		ReturnValue |= REMOTE_SUNSHINE_NOT_CONNECTED;
@@ -1614,6 +1612,62 @@ void remoteStreamingEvent(DWORD dwType)
 	return;
 }
 
+DWORD checkSunshineLogs(void)
+{
+	DWORD ReturnValue = 0;
+	int index = 0;
+	for(auto& logfile : Remote.Sunshine_Log_Files)
+	{
+		if (logfile != "")
+		{
+			std::error_code ec;
+			uintmax_t Size = std::filesystem::file_size(logfile, ec);
+			if (!ec && Size != Remote.Sunshine_Log_Sizes[index])
+			{
+				Remote.Sunshine_Log_Sizes[index] = Size;
+				if (index == 0) // SUNSHINE
+					ReturnValue |= sunshine_CheckLog(logfile);
+				else if (index == 1) //APOLLO
+				{
+					DWORD val = sunshine_CheckLog(logfile);
+					if (val == REMOTE_SUNSHINE_CONNECTED)
+						ReturnValue |= REMOTE_APOLLO_CONNECTED;
+					else if (val == REMOTE_SUNSHINE_NOT_CONNECTED)
+						ReturnValue |= REMOTE_APOLLO_NOT_CONNECTED;
+				}
+			}
+		}
+		index++;
+	}
+	return ReturnValue;
+}
+// The Sunshine install folder, from the configuration of its service, which users can read (the process of the
+// streaming host cannot be queried by the user). The service runs <install>\tools\sunshinesvc.exe
+std::string sunshine_GetInstallDir(void)
+{
+	std::string dir;
+	SC_HANDLE manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+	if (!manager)
+		return dir;
+	SC_HANDLE service = OpenServiceA(manager, "SunshineService", SERVICE_QUERY_CONFIG);
+	if (service)
+	{
+		DWORD needed = 0;
+		QueryServiceConfigA(service, NULL, 0, &needed);
+		std::vector<BYTE> buffer(needed);
+		auto config = reinterpret_cast<LPQUERY_SERVICE_CONFIGA>(buffer.data());
+		if (needed > 0 && QueryServiceConfigA(service, config, needed, &needed) && config->lpBinaryPathName)
+		{
+			std::string path = config->lpBinaryPathName;
+			if (path.size() > 1 && path[0] == '"')
+				path = path.substr(1, path.find('"', 1) - 1);
+			dir = std::filesystem::path(path).parent_path().parent_path().string();
+		}
+		CloseServiceHandle(service);
+	}
+	CloseServiceHandle(manager);
+	return dir;
+}
 DWORD sunshine_CheckLog(std::string input_file)
 {
 	std::string log;
@@ -1657,9 +1711,6 @@ DWORD sunshine_CheckLog(std::string input_file)
 
 std::vector<std::string> sunshine_GetLogFiles()
 {
-	std::string Sunshine_Config;
-	std::string configuration_path;
-	std::string configuration_text;
 	std::vector<std::string> log_files(Remote.sunshine_list.size(), "");
 
 	for(int i = 0; i<Remote.sunshine_list.size();i++)
@@ -1676,45 +1727,8 @@ std::vector<std::string> sunshine_GetLogFiles()
 
 			// Query string value
 			if (RegQueryValueExA(hKey, pszValueName, NULL, NULL, reinterpret_cast<LPBYTE>(&szValue), &cbValueLength) == ERROR_SUCCESS)
-			{
-				configuration_path = szValue;
-				configuration_path += "\\config\\";
-				Sunshine_Config = configuration_path;
-				Sunshine_Config += SUNSHINE_FILE_CONF;
-
-				//open the configuration file
-				std::ifstream t(Sunshine_Config);
-				if (t.is_open())
-				{
-					std::stringstream buffer;
-					buffer << t.rdbuf();
-					configuration_text = buffer.str();
-					t.close();
-
-					std::string s = sunshine_GetConfVal(configuration_text, "min_log_level");
-					if (s != "" && s != "2" && s != "1" && s != "0")
-					{
-						log(L"Logging need to be at minimum on level \"info\" in Sunshine/Apollo.");
-						continue;
-					}
-
-					s = sunshine_GetConfVal(configuration_text, "log_path");
-					if (s == "") //DEFAULT
-					{
-						std::string log_file = configuration_path;
-						log_file += SUNSHINE_FILE_LOG;
-						log_files[i] = log_file;
-					}
-					else
-					{
-						std::filesystem::path log_p(s);
-						std::filesystem::current_path(configuration_path);
-						std::filesystem::path log_abs(std::filesystem::absolute(log_p));
-						std::string log_file = log_abs.string();
-						log_files[i] = log_file;
-					}
-				}
-			}
+				log_files[i] = sunshine_GetLogFile(szValue);
+			RegCloseKey(hKey);
 		}
 	}
 	return log_files;
@@ -1731,6 +1745,39 @@ std::vector<std::string> sunshine_GetLogFiles()
 	*/
 }
 
+// the log file of a Sunshine/Apollo install, from its configuration. Empty if it cannot be used
+std::string sunshine_GetLogFile(std::string install_dir)
+{
+	if (install_dir == "")
+		return "";
+	std::string configuration_path = install_dir;
+	configuration_path += "\\config\\";
+	std::string Sunshine_Config = configuration_path;
+	Sunshine_Config += SUNSHINE_FILE_CONF;
+
+	//open the configuration file
+	std::ifstream t(Sunshine_Config);
+	if (!t.is_open())
+		return "";
+	std::stringstream buffer;
+	buffer << t.rdbuf();
+	std::string configuration_text = buffer.str();
+	t.close();
+
+	std::string s = sunshine_GetConfVal(configuration_text, "min_log_level");
+	if (s != "" && s != "2" && s != "1" && s != "0")
+	{
+		log(L"Logging need to be at minimum on level \"info\" in Sunshine/Apollo.");
+		return "";
+	}
+
+	s = sunshine_GetConfVal(configuration_text, "log_path");
+	if (s == "") //DEFAULT
+		return configuration_path + SUNSHINE_FILE_LOG;
+	std::filesystem::path log_p(s);
+	std::filesystem::current_path(configuration_path);
+	return std::filesystem::absolute(log_p).string();
+}
 std::string sunshine_GetConfVal(std::string buf, std::string conf_item)
 {
 	conf_item += " = ";

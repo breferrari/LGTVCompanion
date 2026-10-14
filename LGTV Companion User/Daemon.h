@@ -14,6 +14,9 @@ static BOOL	CALLBACK		meproc(HMONITOR hMon, HDC hdc, LPRECT lprcMonitor, LPARAM 
 bool						checkDisplayTopology(void);
 int							verifyTopology();
 DWORD						checkRemoteStreamingProcesses(void);
+DWORD						checkSunshineLogs(void);
+std::string					sunshine_GetLogFile(std::string);
+std::string					sunshine_GetInstallDir(void);
 void						remoteStreamingEvent(DWORD dwType);
 DWORD						sunshine_CheckLog(std::string);
 std::string					sunshine_GetConfVal(std::string, std::string);
