@@ -1604,10 +1604,18 @@ void remoteStreamingEvent(DWORD dwType)
 		}
 		bool bConnect = Remote.bRemoteCurrentStatusSteam || Remote.bRemoteCurrentStatusNvidia || Remote.bRemoteCurrentStatusRDP || Remote.bRemoteCurrentStatusSunshine || Remote.bRemoteCurrentStatusApollo;
 
+		// a change cancels the opposite one still waiting, so a stream shorter than the connect delay is not reported
+		// as connected after its disconnect
 		if (bCurrentlyConnected && !bConnect)
+		{
+			KillTimer(h_main_wnd, (UINT_PTR)REMOTE_CONNECT);
 			SetTimer(h_main_wnd, (UINT_PTR)REMOTE_DISCONNECT, 1000, (TIMERPROC)NULL);
+		}
 		else if (!bCurrentlyConnected && bConnect)
+		{
+			KillTimer(h_main_wnd, (UINT_PTR)REMOTE_DISCONNECT);
 			SetTimer(h_main_wnd, (UINT_PTR)REMOTE_CONNECT, TIMER_REMOTE_DELAY, (TIMERPROC)NULL);
+		}
 	}
 	return;
 }
