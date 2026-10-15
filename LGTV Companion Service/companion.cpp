@@ -462,8 +462,7 @@ void Companion::Impl::dispatchEvent(Event& event) {
 	case EVENT_SYSTEM_DISPLAYON:
 		windows_power_status_on_ = true;
 		time_last_power_on = pp_entry;
-		if (!remote_client_connected_)
-			stream_end_dark_pending_ = false;	// the user is back
+		// while the devices are kept dark after a stream, the daemon tells whether a user is back (stream_end_wake)
 		break;
 	case EVENT_SYSTEM_RESUMEAUTO:
 		remote_client_connected_ = false;
@@ -655,6 +654,8 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 				break;
 
 			case EVENT_SYSTEM_DISPLAYON:
+				if (stream_end_dark_pending_ && !remote_client_connected_)
+					break;	// the daemon tells whether a user is back or the stream teardown woke the displays (stream_end_wake)
 				if (remote_client_connected_)
 				{
 					// The device may show the picture again when the signal returns, even after confirming that the
@@ -1065,6 +1066,18 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 				if (!remote_client_connected_ && !stream_end_dark_pending_)
 					INFO_("Display", "Not streaming. Leaving the device to the regular display power handling");
 				event(EVENT_SYSTEM_DISPLAY_LOST);
+				continue;
+			}
+			else if (daemon_command == "stream_end_wake")
+			{
+				if (nWords > 3 && words[3] == "user")
+				{
+					INFO_(daemon_number, "Windows displays turned on by local input after the remote stream. Powering on");
+					stream_end_dark_pending_ = false;
+					event(EVENT_SYSTEM_DISPLAYON);
+				}
+				else
+					INFO_(daemon_number, "Windows displays turned on without local input after the remote stream (stream teardown). Keeping the devices dark");
 				continue;
 			}
 			else if (daemon_command == "stream_end_settled")

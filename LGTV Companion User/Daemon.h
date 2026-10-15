@@ -15,6 +15,7 @@ bool						checkDisplayTopology(void);
 int							verifyTopology();
 DWORD						checkRemoteStreamingProcesses(void);
 DWORD						checkSunshineLogs(void);
+void						watchLocalInput(HWND, bool);
 std::string					sunshine_GetLogFile(std::string);
 std::string					sunshine_GetInstallDir(void);
 void						remoteStreamingEvent(DWORD dwType);

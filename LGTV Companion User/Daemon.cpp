@@ -182,6 +182,7 @@ Preferences						Prefs(CONFIG_FILE);
 std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
 ULONGLONG						displays_off_requested_at = 0;	// pending request to turn off the windows displays (0 = none)
+ULONGLONG						last_local_input_at = 0;		// last keyboard/mouse input from a physical device, tracked while a request is pending
 StreamLiveness					stream_liveness;
 ULONGLONG						stream_last_active = 0;			// last time the streaming host was seen encoding
 bool							stream_stale_reported = false;
@@ -444,6 +445,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			log(L"Service requests windows displays OFF (remote streaming end mode).");
 			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 			displays_off_requested_at = GetTickCount64();
+			watchLocalInput(hWnd, true);
 			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
 		}
 	}break;
@@ -485,6 +487,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 		if (!lParam)
 			return 0;
+		if (displays_off_requested_at != 0)
+		{
+			RAWINPUTHEADER header;
+			UINT header_size = sizeof(header);
+			if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_HEADER, &header, &header_size, sizeof(RAWINPUTHEADER)) != (UINT)-1
+				&& header.hDevice != NULL && (header.dwType == RIM_TYPEKEYBOARD || header.dwType == RIM_TYPEMOUSE))
+				last_local_input_at = GetTickCount64();
+			if (!Prefs.user_idle_mode_)
+				return 0;
+		}
 		DWORD tick_now = GetTickCount();
 		if ((tick_now - time_of_last_raw_input) < TIMER_MAIN_DELAY_WHEN_BUSY)
 		{
@@ -820,6 +832,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				break;
 			}
 			displays_off_requested_at = 0;
+			watchLocalInput(hWnd, false);
 			log(L"Display configuration settled after the remote stream.");
 			communicateWithService(L"stream_end_settled", false);
 		}break;
@@ -956,6 +969,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					}
 					else
 					{
+						// Windows turns the displays on when the stream ends (tearing down the virtual controller, audio
+						// device and notifications), right after they were turned off. Only local keyboard or mouse input
+						// means that someone is at the PC.
+						if (displays_off_requested_at != 0)
+						{
+							if (last_local_input_at >= displays_off_requested_at)
+							{
+								log(L"Windows displays turned on by local input after the remote stream.");
+								displays_off_requested_at = 0;
+								KillTimer(hWnd, TIMER_DISPLAYS_OFF);
+								watchLocalInput(hWnd, false);
+								communicateWithService(L"stream_end_wake user", false);
+							}
+							else
+							{
+								log(L"Windows displays turned on without local input after the remote stream. Turning them off again.");
+								PostMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
+								communicateWithService(L"stream_end_wake stray", false);
+							}
+						}
 						user_is_idle = false;
 						time_of_last_raw_input = GetTickCount();
 						if (Prefs.user_idle_mode_)
@@ -1867,6 +1900,19 @@ static void RawInput_AddRegistration(std::vector<RAWINPUTDEVICE>& devices, std::
 	registered.insert(key);
 }
 
+// Listen to the physical keyboard and mouse while the displays are kept off after a remote stream, so that a display
+// wake can be told apart from the stream teardown. Already registered when the user idle mode is on.
+void watchLocalInput(HWND hwnd, bool watch)
+{
+	if (Prefs.user_idle_mode_)
+		return;
+	RAWINPUTDEVICE devices[2] = {
+		{ 0x01, 0x06, watch ? (DWORD)RIDEV_INPUTSINK : (DWORD)RIDEV_REMOVE, watch ? hwnd : NULL },	// keyboard
+		{ 0x01, 0x02, watch ? (DWORD)RIDEV_INPUTSINK : (DWORD)RIDEV_REMOVE, watch ? hwnd : NULL }	// mouse
+	};
+	last_local_input_at = 0;
+	RegisterRawInputDevices(devices, 2, sizeof(RAWINPUTDEVICE));
+}
 bool RawInput_RegisterDevices(HWND hwnd)
 {
 	std::vector<RAWINPUTDEVICE> devices;
