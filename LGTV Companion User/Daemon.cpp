@@ -74,6 +74,8 @@
 #define         TIMER_STREAM_LIVENESS_DELAY				15000	// sampled only while the service reports a remote stream
 #define         TIMER_SUNSHINE_LOG						27
 #define         TIMER_SUNSHINE_LOG_DELAY				1000	// while streaming: notice a disconnect before the host reverts the display (3 s by default)
+#define         TIMER_STREAM_END_GUARD					28
+#define         TIMER_STREAM_END_GUARD_DELAY			20000	// after the display configuration settled, keep telling a stream teardown wake from a user this long
 #define         STREAM_STALE_AFTER						90000	// streaming host encoder idle this long: the stream has ended
 #define			COPYDATA_MUTEX_WAIT						10
 #define         APP_DISPLAYCHANGE						WM_USER+10
@@ -182,7 +184,8 @@ Preferences						Prefs(CONFIG_FILE);
 std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
 ULONGLONG						displays_off_requested_at = 0;	// pending request to turn off the windows displays (0 = none)
-ULONGLONG						last_local_input_at = 0;		// last keyboard/mouse input from a physical device, tracked while a request is pending
+ULONGLONG						last_local_input_at = 0;		// last keyboard/mouse input from a physical device, tracked during the stream end guard
+ULONGLONG						stream_end_guard_since = 0;		// a stream ended and the displays are kept off: a display wake needs local input to count (0 = none)
 StreamLiveness					stream_liveness;
 ULONGLONG						stream_last_active = 0;			// last time the streaming host was seen encoding
 bool							stream_stale_reported = false;
@@ -445,6 +448,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			log(L"Service requests windows displays OFF (remote streaming end mode).");
 			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 			displays_off_requested_at = GetTickCount64();
+			stream_end_guard_since = displays_off_requested_at;
+			KillTimer(hWnd, TIMER_STREAM_END_GUARD);
 			watchLocalInput(hWnd, true);
 			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
 		}
@@ -470,6 +475,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		{
 			stream_last_active = GetTickCount64();
 			stream_stale_reported = false;
+			if (stream_end_guard_since != 0)	// a new stream: its display wakes are expected
+			{
+				stream_end_guard_since = 0;
+				displays_off_requested_at = 0;
+				KillTimer(hWnd, TIMER_DISPLAYS_OFF);
+				KillTimer(hWnd, TIMER_STREAM_END_GUARD);
+				watchLocalInput(hWnd, false);
+			}
 			SetTimer(hWnd, TIMER_STREAM_LIVENESS, TIMER_STREAM_LIVENESS_DELAY, (TIMERPROC)NULL);
 			if (Prefs.remote_streaming_host_support_)
 				SetTimer(hWnd, TIMER_SUNSHINE_LOG, TIMER_SUNSHINE_LOG_DELAY, (TIMERPROC)NULL);
@@ -487,7 +500,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 		if (!lParam)
 			return 0;
-		if (displays_off_requested_at != 0)
+		if (stream_end_guard_since != 0)
 		{
 			RAWINPUTHEADER header;
 			UINT header_size = sizeof(header);
@@ -804,6 +817,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			if (dw)
 				remoteStreamingEvent(dw);
 		}break;
+		case TIMER_STREAM_END_GUARD:
+		{
+			KillTimer(hWnd, TIMER_STREAM_END_GUARD);
+			stream_end_guard_since = 0;
+			watchLocalInput(hWnd, false);
+			communicateWithService(L"stream_end_done", false);
+		}break;
 		case TIMER_SUNSHINE_LOG:
 		{
 			// A client that disconnects without quitting the app runs no undo command, but the host still reverts
@@ -832,9 +852,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				break;
 			}
 			displays_off_requested_at = 0;
-			watchLocalInput(hWnd, false);
 			log(L"Display configuration settled after the remote stream.");
 			communicateWithService(L"stream_end_settled", false);
+			// the device is being powered off now, and the displays can still be woken by the teardown
+			SetTimer(hWnd, TIMER_STREAM_END_GUARD, TIMER_STREAM_END_GUARD_DELAY, (TIMERPROC)NULL);
 		}break;
 		case TIMER_STREAM_LIVENESS:
 		{
@@ -972,13 +993,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 						// Windows turns the displays on when the stream ends (tearing down the virtual controller, audio
 						// device and notifications), right after they were turned off. Only local keyboard or mouse input
 						// means that someone is at the PC.
-						if (displays_off_requested_at != 0)
+						if (stream_end_guard_since != 0)
 						{
-							if (last_local_input_at >= displays_off_requested_at)
+							if (last_local_input_at >= stream_end_guard_since)
 							{
 								log(L"Windows displays turned on by local input after the remote stream.");
 								displays_off_requested_at = 0;
+								stream_end_guard_since = 0;
 								KillTimer(hWnd, TIMER_DISPLAYS_OFF);
+								KillTimer(hWnd, TIMER_STREAM_END_GUARD);
 								watchLocalInput(hWnd, false);
 								communicateWithService(L"stream_end_wake user", false);
 							}

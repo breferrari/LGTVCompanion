@@ -447,8 +447,7 @@ void Companion::Impl::dispatchEvent(Event& event) {
 		windows_power_status_on_ = false;
 		break;
 	case EVENT_SYSTEM_STREAM_END_SETTLED:
-		stream_end_dark_pending_ = false;
-		break;
+		break;	// still pending: the daemon keeps telling stream teardown wakes from users for a while (stream_end_done)
 	case EVENT_SYSTEM_DISPLAY_LOST:
 		if (remote_client_connected_)
 			remote_stream_darkened_ = true;	// woken with the screen off
@@ -700,7 +699,7 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 				if (stream_end_dark_pending_) // stays awake and dark until the display configuration has settled
 					break;
 				if (windows_power_status_on_ == true)
-					work_was_enqueued = session.client_.powerOff();
+					work_was_enqueued = session.client_.powerOff(false, true);	// keep retrying a device that does not answer on the network for a while
 				break;
 
 			case EVENT_SYSTEM_BLANKSCREEN:
@@ -720,7 +719,7 @@ void Companion::Impl::processEvent(Event& event, SessionWrapper& session)
 				break;
 
 			case EVENT_SYSTEM_STREAM_END_SETTLED:
-				if (stream_end_dark_pending_)
+				if (stream_end_dark_pending_ && !remote_client_connected_)
 				{
 					INFO_(session.device_.name, "Display configuration settled after the remote stream. Powering off");
 					work_was_enqueued = session.client_.powerOff(false, true);	// it must not stay on with the screen off
@@ -1078,6 +1077,11 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 				}
 				else
 					INFO_(daemon_number, "Windows displays turned on without local input after the remote stream (stream teardown). Keeping the devices dark");
+				continue;
+			}
+			else if (daemon_command == "stream_end_done")
+			{
+				stream_end_dark_pending_ = false;
 				continue;
 			}
 			else if (daemon_command == "stream_end_settled")
