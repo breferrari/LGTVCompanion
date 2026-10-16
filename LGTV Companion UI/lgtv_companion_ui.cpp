@@ -260,9 +260,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance,
 		prepareForUninstall();
 		return false;
 	}
-	if (command_line.rfind(L"-streaming_prepare", 0) == 0)
+	if (command_line.rfind(L"-streaming_prepare", 0) == 0 || command_line == L"-streaming_event prepare")
 	{
 		prepareStreaming();
+		return false;
+	}
+	if (command_line.rfind(L"-streaming_event ", 0) == 0)	// started, ended, released: not waited for
+	{
+		sendStreamingEvent(command_line);
 		return false;
 	}
 	// if commandline directed towards daemon
@@ -3791,6 +3796,22 @@ void prepareStreaming(void)
 		WaitForSingleObject(streaming_prepared_event, STREAMING_PREPARE_TIMEOUT);
 	client->terminate();
 	CloseHandle(streaming_prepared_event);
+}
+
+// The other phases of a stream reported by the streaming host (Sunshine: stream_notify_cmd). Sent straight to
+// the service, so that they arrive in order and are not delayed by the daemon.
+static void ipcCallbackIgnore(std::wstring, LPVOID) {}
+void sendStreamingEvent(std::wstring command_line)
+{
+	auto client = std::make_shared<IpcClient2>(PIPENAME, ipcCallbackIgnore, (LPVOID)NULL);
+	int max_wait = 1000;
+	while (!client->send(command_line) && max_wait > 0)
+	{
+		Sleep(25);
+		max_wait -= 25;
+	}
+	Sleep(50);	// let the message leave before the pipe closes
+	client->terminate();
 }
 
 void prepareForUninstall(void)

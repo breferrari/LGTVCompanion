@@ -29,6 +29,7 @@ std::vector<DisplayInfo>							queryDisplays();
 bool												messageDaemon(std::wstring);
 void												ipcCallback(std::wstring message, LPVOID pt);
 void												prepareStreaming(void);
+void												sendStreamingEvent(std::wstring);
 void												prepareForUninstall(void);
 int													customMsgBox(HWND hParent, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType);
 

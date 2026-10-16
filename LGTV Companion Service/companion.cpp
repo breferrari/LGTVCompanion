@@ -70,6 +70,8 @@ private:
 	bool												remote_stream_darkened_ = false;		// whether the current remote stream powered off or blanked any device
 	bool												stream_end_dark_pending_ = false;		// a stream ended with the devices kept dark. Windows displays are about to be turned off
 	std::shared_ptr<StreamPrepare>						stream_prepare_;						// the latest -streaming_prepare request
+	bool												host_owned_ = false;					// the streaming host reports the phases of the current stream (-streaming_event)
+	std::chrono::steady_clock::time_point				host_ended_at_ {};						// when the host reported the end of the stream
 	bool												screensaver_active_ = false;
 	time_t												time_last_resume_or_boot_time = 0;
 	time_t												time_last_power_on = 0;
@@ -408,11 +410,13 @@ void Companion::Impl::dispatchEvent(Event& event) {
 			if (!any_display_restored)
 			{
 				DEBUG("Requesting the daemon to turn off windows displays (sync with remote streaming end mode)");
-				ipc_server_->send(L"DAEMON_DISPLAYS_OFF");
+				ipc_server_->send(host_owned_ ? L"DAEMON_DISPLAYS_OFF HOST" : L"DAEMON_DISPLAYS_OFF");
 				stream_end_dark_pending_ = true;
 			}
 		}
 		remote_client_connected_ = false;
+		if (!stream_end_dark_pending_)
+			host_owned_ = false;
 		break;
 	case EVENT_SYSTEM_SHUTDOWN:
 	case EVENT_SYSTEM_UNSURE:
@@ -959,6 +963,16 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 				}
 				continue;
 			}
+			else if (daemon_command == "remote_connect" && host_owned_)
+			{
+				DEBUG_(daemon_number, "Remote streaming client connect detected, ignored: the streaming host reports this stream itself");
+				continue;
+			}
+			else if (daemon_command == "remote_disconnect" && host_owned_)
+			{
+				DEBUG_(daemon_number, "Remote streaming client disconnect detected, ignored: the streaming host reports this stream itself");
+				continue;
+			}
 			else if (daemon_command == "remote_connect")
 			{
 				if (windows_power_status_on_)
@@ -1073,6 +1087,7 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 				{
 					INFO_(daemon_number, "Windows displays turned on by local input after the remote stream. Powering on");
 					stream_end_dark_pending_ = false;
+					host_owned_ = false;
 					event(EVENT_SYSTEM_DISPLAYON);
 				}
 				else
@@ -1082,6 +1097,8 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 			else if (daemon_command == "stream_end_done")
 			{
 				stream_end_dark_pending_ = false;
+				if (!remote_client_connected_)
+					host_owned_ = false;
 				continue;
 			}
 			else if (daemon_command == "stream_end_settled")
@@ -1155,6 +1172,11 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 				INFO_("CLI", "Cannot force streaming client connect. Support for remote streaming is disabled.");
 				continue;
 			}
+			if (host_owned_)
+			{
+				INFO_("CLI", "Streaming client connect ignored: the streaming host reports this stream itself");
+				continue;
+			}
 			if (windows_power_status_on_)
 				INFO_("CLI", "Forced streaming client connect. All managed devices will %1%", prefs_.remote_streaming_host_prefer_power_off_ ? "power OFF" : "be blanked");
 			else
@@ -1185,6 +1207,7 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 				continue;
 			}
 			INFO_("CLI", "The streaming host is about to configure the display for a stream. All managed devices will be woken with the screen off first");
+			host_owned_ = true;	// from now on the host reports the stream: ignore other connect and disconnect signals
 			// a device waking up shows the picture until it accepts turning the screen off, so stop the picture first
 			if (windows_power_status_on_)
 				ipc_server_->send(L"DAEMON_MONITORS_OFF");
@@ -1192,11 +1215,66 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 			event(EVENT_SYSTEM_REMOTE_PREPARE);
 			continue;
 		}
+		else if (command == "streaming_event")
+		{
+			std::string phase = nWords > 1 ? tools::tolower(words[1]) : "";
+			if (!prefs_.remote_streaming_host_support_)
+			{
+				DEBUG_("Stream", "Phase %1% ignored. Support for remote streaming is disabled", phase);
+				continue;
+			}
+			if (phase == "started")
+			{
+				INFO_("Stream", "The streaming host reports that the stream is running");
+				if (!remote_client_connected_)	// e.g. LGTV Companion restarted during the stream
+				{
+					host_owned_ = true;
+					event(EVENT_SYSTEM_REMOTE_CONNECT);
+				}
+			}
+			else if (phase == "ended")
+			{
+				host_ended_at_ = std::chrono::steady_clock::now();
+				if (remote_client_connected_)
+				{
+					INFO_("Stream", "The streaming host reports that the stream has ended. All managed devices will %1%", remoteEndActionDescription());
+					host_owned_ = true;
+					event(EVENT_SYSTEM_REMOTE_DISCONNECT);
+				}
+				else
+					INFO_("Stream", "The streaming host reports that the stream has ended. No stream was active");
+			}
+			else if (phase == "released")
+			{
+				if (remote_client_connected_ && host_owned_)	// released without ended: the launch failed after prepare
+				{
+					INFO_("Stream", "The streaming host restored the display without a running stream (the launch failed). All managed devices will %1%", remoteEndActionDescription());
+					host_ended_at_ = std::chrono::steady_clock::now();
+					event(EVENT_SYSTEM_REMOTE_DISCONNECT);
+				}
+				if (stream_end_dark_pending_)
+				{
+					auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - host_ended_at_).count();
+					INFO_("Stream", "The streaming host has restored the display configuration, %1% ms after the stream ended", std::to_string(ms));
+					ipc_server_->send(L"DAEMON_STREAM_RELEASED");
+				}
+				else
+					DEBUG_("Stream", "The streaming host has restored the display configuration. Nothing pending");
+			}
+			else
+				WARNING_("Stream", "Unknown stream phase: %1%", phase);
+			continue;
+		}
 		else if (command == "streaming_disconnect")
 		{
 			if (!prefs_.remote_streaming_host_support_)
 			{
 				INFO_("CLI", "Cannot force streaming client disconnect. Support for remote streaming is disabled.");
+				continue;
+			}
+			if (host_owned_)
+			{
+				INFO_("CLI", "Streaming client disconnect ignored: the streaming host reports this stream itself");
 				continue;
 			}
 			if (windows_power_status_on_)

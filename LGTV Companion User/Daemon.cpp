@@ -82,6 +82,7 @@
 #define         APP_SET_MESSAGEFILTER					WM_USER+11
 #define         APP_DISPLAYS_OFF_REQUEST				WM_USER+12
 #define         APP_MONITORS_OFF_REQUEST				WM_USER+14
+#define         APP_STREAM_RELEASED						WM_USER+15
 #define         APP_STREAM_STATE						WM_USER+13
 #define         APP_USER_IDLE_ON						1
 #define         APP_USER_IDLE_OFF						2
@@ -184,6 +185,7 @@ Preferences						Prefs(CONFIG_FILE);
 std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
 ULONGLONG						displays_off_requested_at = 0;	// pending request to turn off the windows displays (0 = none)
+bool							displays_off_host_owned = false;	// the streaming host reports when it has restored the display (released)
 ULONGLONG						last_local_input_at = 0;		// last keyboard/mouse input from a physical device, tracked during the stream end guard
 ULONGLONG						stream_end_guard_since = 0;		// a stream ended and the displays are kept off: a display wake needs local input to count (0 = none)
 StreamLiveness					stream_liveness;
@@ -448,10 +450,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			log(L"Service requests windows displays OFF (remote streaming end mode).");
 			SendMessage(hWnd, WM_SYSCOMMAND, SC_MONITORPOWER, (LPARAM)2);
 			displays_off_requested_at = GetTickCount64();
+			displays_off_host_owned = wParam != 0;
 			stream_end_guard_since = displays_off_requested_at;
 			KillTimer(hWnd, TIMER_STREAM_END_GUARD);
 			watchLocalInput(hWnd, true);
-			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
+			// The streaming host reports when it has restored the display. Otherwise wait for the configuration to settle
+			SetTimer(hWnd, TIMER_DISPLAYS_OFF, displays_off_host_owned ? TIMER_DISPLAYS_OFF_MAX_WAIT : TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
+		}
+	}break;
+
+	case APP_STREAM_RELEASED:
+	{
+		// The streaming host has restored the display configuration: the stream end has settled now
+		if (displays_off_requested_at != 0)
+		{
+			log(L"Streaming host released the display.");
+			KillTimer(hWnd, TIMER_DISPLAYS_OFF);
+			PostMessage(hWnd, WM_TIMER, TIMER_DISPLAYS_OFF, 0);
 		}
 	}break;
 
@@ -851,7 +866,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);	// a lost display is being recovered
 				break;
 			}
+			if (displays_off_host_owned && GetTickCount64() - displays_off_requested_at >= TIMER_DISPLAYS_OFF_MAX_WAIT)
+				communicateWithService(L"display_guard The streaming host did not report restoring the display within 30 s. Powering off anyway", false);
 			displays_off_requested_at = 0;
+			displays_off_host_owned = false;
 			log(L"Display configuration settled after the remote stream.");
 			communicateWithService(L"stream_end_settled", false);
 			// the device is being powered off now, and the displays can still be woken by the teardown
@@ -1043,7 +1061,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		display_guard.check();
 		SetTimer(hWnd, TIMER_DISPLAY_GUARD, display_guard.checkInterval(), (TIMERPROC)NULL);
 		// postpone turning off the windows displays until the display configuration has settled
-		if (displays_off_requested_at != 0 && GetTickCount64() - displays_off_requested_at < TIMER_DISPLAYS_OFF_MAX_WAIT)
+		if (displays_off_requested_at != 0 && !displays_off_host_owned && GetTickCount64() - displays_off_requested_at < TIMER_DISPLAYS_OFF_MAX_WAIT)
 			SetTimer(hWnd, TIMER_DISPLAYS_OFF, TIMER_DISPLAYS_OFF_SETTLE, (TIMERPROC)NULL);
 		if (Prefs.topology_support_)
 		{
@@ -1860,8 +1878,10 @@ void ipcCallback(std::wstring message, LPVOID pt)
 {
 	if (message.find(L"DAEMON_MONITORS_OFF") != std::wstring::npos)
 		PostMessage(h_main_wnd, APP_MONITORS_OFF_REQUEST, NULL, NULL);
+	else if (message.find(L"DAEMON_STREAM_RELEASED") != std::wstring::npos)
+		PostMessage(h_main_wnd, APP_STREAM_RELEASED, NULL, NULL);
 	else if (message.find(L"DAEMON_DISPLAYS_OFF") != std::wstring::npos)
-		PostMessage(h_main_wnd, APP_DISPLAYS_OFF_REQUEST, NULL, NULL);
+		PostMessage(h_main_wnd, APP_DISPLAYS_OFF_REQUEST, message.find(L"DAEMON_DISPLAYS_OFF HOST") != std::wstring::npos ? 1 : 0, NULL);
 	else if (message.find(L"DAEMON_STREAM_STARTED") != std::wstring::npos)
 		PostMessage(h_main_wnd, APP_STREAM_STATE, 1, NULL);
 	else if (message.find(L"DAEMON_STREAM_ENDED") != std::wstring::npos)

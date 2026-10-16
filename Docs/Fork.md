@@ -40,20 +40,29 @@ For a PC that streams with Sunshine or Apollo and uses an LG OLED as its display
 | LGTV Companion | Remote streaming end mode | Display off |
 | LGTV Companion | Updates | Off, or notify (checks this fork) |
 | Sunshine / Apollo | `global_prep_cmd` | Run `"C:\Program Files\LGTV Companion\LGTV Companion.exe" -streaming_connect` on start and `-streaming_disconnect` on undo |
-| Sunshine (fork) | `dd_prepare_cmd` | `"C:\Program Files\LGTV Companion\LGTV Companion.exe" -streaming_prepare` |
+| Sunshine (fork) | `stream_notify_cmd` | `"C:\Program Files\LGTV Companion\LGTV Companion.exe" -streaming_event` (replaces the `global_prep_cmd` and `dd_prepare_cmd` entries) |
 | LG TV | Quick Start+ | On |
 | LG TV | TV On With Mobile | On, so LGTV Companion can control the TV over the network |
 
 ## Sunshine
 
-A display in standby can only be protected if it is woken before the streaming host changes the display mode. Sunshine applies the mode first and runs its prep commands after, so the fork [breferrari/Sunshine](https://github.com/breferrari/Sunshine) adds `dd_prepare_cmd`: a command that Sunshine runs, and waits for, before it configures the display for a launch or a resume. Set it to `-streaming_prepare` as in the recommended settings. It is on the branch `fork/prep-before-display`, rebased onto upstream `master` to pick up upstream fixes as they land (`git fetch upstream; git rebase upstream/master`). Its installer is built by the fork's "Fork Windows Build" workflow, which runs on every push to the branch and can be started by hand.
+The fork [breferrari/Sunshine](https://github.com/breferrari/Sunshine) (branch `fork/prep-before-display`, upstream `master` plus the fork's commits) reports every phase of a stream to LGTV Companion through `stream_notify_cmd`, so that LGTV Companion follows the stream instead of inferring it from the streaming host's log, prep commands and Windows display events:
+
+| Phase | When | LGTV Companion |
+|---|---|---|
+| `prepare` | Before the display is configured for a launch or resume. Sunshine waits for it. | Turns the Windows displays off if they are on, wakes the TV with the screen off and returns once it is on (`-streaming_prepare`). Sunshine then turns the Windows displays on and waits until they can be captured before it changes the display mode. |
+| `started` | The stream is running. | Logged. Starts the stream if LGTV Companion missed `prepare`. |
+| `ended` | The client quit or disconnected. | Turns the Windows displays off right away and keeps the TV awake with the screen off. |
+| `released` | Sunshine has restored the display configuration. | Powers the TV off. |
+
+From `prepare` until the stream has been released, LGTV Companion ignores its other connect and disconnect signals (`-streaming_connect`, `-streaming_disconnect`, the streaming host's log). The stream liveness check stays as a safety net, and the TV is powered off 30 s after the end of a stream if `released` never arrives. The fork also retries the capture at stream start, and keeps upstream #5625 reverted (see LizardByte/Sunshine#5942). Local builds: `scripts/fork/build-local.ps1 -Install`.
 
 ## Clean Windows install
 
 1. Download the latest `LGTV.Companion.Setup.v<version>.x64.msi` from the [releases page](https://github.com/breferrari/LGTVCompanion/releases) and install it.
 2. Open LGTV Companion, add the TV and pair it (accept the prompt on the TV).
 3. Apply the [recommended settings](#recommended-settings).
-4. Install Sunshine from [the fork](#sunshine) and add the `global_prep_cmd` and `dd_prepare_cmd` above.
+4. Install Sunshine from [the fork](#sunshine) and set `stream_notify_cmd` as above.
 
 Installing a fork release over an upstream install, or over another fork build, upgrades it in place and keeps the configuration.
 
