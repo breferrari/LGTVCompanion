@@ -1034,6 +1034,8 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 			else
 				ERR("Unmanaged command during POWER ON: %1%. Aborting!", response_id);
 		}
+		else if (work_.type_ == WORK_REQUEST && response_id == "blankScreen" && !payload["state"].empty() && payload["state"].is_string() && payload["state"] == "Screen Off")
+			DEBUG("The screen is already off");
 		else if (work_.type_ == WORK_REQUEST && !response["error"].empty() && response["error"].is_string())
 				WARNING("Error message received:%1%", response["error"]);
 		else

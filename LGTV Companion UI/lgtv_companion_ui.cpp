@@ -3768,50 +3768,78 @@ void ipcCallback(std::wstring message, LPVOID pt)
 }
 
 // -streaming_prepare is run by the streaming host before it configures the display for a stream (Sunshine:
-// dd_prepare_cmd). The service wakes the devices with the screen off, and this process returns once the
-// service reports back, so that the host only changes the display mode when the devices can accept it.
+// stream_notify_cmd prepare). The service wakes the devices with the screen off, and this process returns once the
+// service reports back, so that the host only changes the display mode when the devices can accept it. The other
+// phases of a stream (started, ended, released) are only sent. The streaming host runs these commands, so they use
+// a plain synchronous pipe exchange: no background threads that could outlive or crash the process on exit.
 #define			STREAMING_PREPARE_TIMEOUT			50000	// ms. Sunshine waits up to 60 s for the command
-static HANDLE		streaming_prepared_event = NULL;
-static std::wstring	streaming_prepared_reply;
-static void ipcCallbackStreamingPrepare(std::wstring message, LPVOID pt)
+static HANDLE openServicePipe(DWORD timeout_ms)
 {
-	if (message.find(streaming_prepared_reply) != std::wstring::npos)
-		SetEvent(streaming_prepared_event);
+	ULONGLONG deadline = GetTickCount64() + timeout_ms;
+	while (true)
+	{
+		HANDLE pipe = CreateFileW(PIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+		if (pipe != INVALID_HANDLE_VALUE)
+			return pipe;
+		if (GetTickCount64() >= deadline)
+			return INVALID_HANDLE_VALUE;
+		if (GetLastError() == ERROR_PIPE_BUSY)
+			WaitNamedPipeW(PIPENAME, 100);
+		else
+			Sleep(25);
+	}
+}
+static bool writeServicePipe(HANDLE pipe, const std::wstring& message)
+{
+	DWORD size = (DWORD)(message.size() * sizeof(wchar_t));
+	DWORD written = 0;
+	if (!WriteFile(pipe, message.data(), size, &written, NULL) || written != size)
+		return false;
+	FlushFileBuffers(pipe);	// returns once the service has read the message
+	return true;
 }
 void prepareStreaming(void)
 {
 	std::wstring token = std::to_wstring(GetCurrentProcessId());
-	streaming_prepared_reply = L"STREAMING_PREPARED " + token + L" ";
-	streaming_prepared_event = CreateEvent(NULL, TRUE, FALSE, NULL);
-	if (!streaming_prepared_event)
+	std::wstring reply = L"STREAMING_PREPARED " + token + L" ";
+	HANDLE pipe = openServicePipe(1000);
+	if (pipe == INVALID_HANDLE_VALUE)
 		return;
-	auto client = std::make_shared<IpcClient2>(PIPENAME, ipcCallbackStreamingPrepare, (LPVOID)NULL);
-	int max_wait = 1000;
-	while (!client->send(L"-streaming_prepare " + token) && max_wait > 0)
+	if (writeServicePipe(pipe, L"-streaming_prepare " + token))
 	{
-		Sleep(25);
-		max_wait -= 25;
+		// the service broadcasts to every connected client: read until our reply arrives
+		std::wstring received;
+		ULONGLONG deadline = GetTickCount64() + STREAMING_PREPARE_TIMEOUT;
+		while (GetTickCount64() < deadline)
+		{
+			DWORD available = 0;
+			if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL))
+				break;
+			if (available < sizeof(wchar_t))
+			{
+				Sleep(20);
+				continue;
+			}
+			std::vector<wchar_t> buffer(available / sizeof(wchar_t));
+			DWORD read = 0;
+			if (!ReadFile(pipe, buffer.data(), (DWORD)(buffer.size() * sizeof(wchar_t)), &read, NULL))
+				break;
+			received.append(buffer.data(), read / sizeof(wchar_t));
+			if (received.find(reply) != std::wstring::npos)
+				break;
+			if (received.size() > 8192)
+				received.erase(0, received.size() - 1024);
+		}
 	}
-	if (max_wait > 0)
-		WaitForSingleObject(streaming_prepared_event, STREAMING_PREPARE_TIMEOUT);
-	client->terminate();
-	CloseHandle(streaming_prepared_event);
+	CloseHandle(pipe);
 }
-
-// The other phases of a stream reported by the streaming host (Sunshine: stream_notify_cmd). Sent straight to
-// the service, so that they arrive in order and are not delayed by the daemon.
-static void ipcCallbackIgnore(std::wstring, LPVOID) {}
 void sendStreamingEvent(std::wstring command_line)
 {
-	auto client = std::make_shared<IpcClient2>(PIPENAME, ipcCallbackIgnore, (LPVOID)NULL);
-	int max_wait = 1000;
-	while (!client->send(command_line) && max_wait > 0)
-	{
-		Sleep(25);
-		max_wait -= 25;
-	}
-	Sleep(50);	// let the message leave before the pipe closes
-	client->terminate();
+	HANDLE pipe = openServicePipe(1000);
+	if (pipe == INVALID_HANDLE_VALUE)
+		return;
+	writeServicePipe(pipe, command_line);
+	CloseHandle(pipe);
 }
 
 void prepareForUninstall(void)
